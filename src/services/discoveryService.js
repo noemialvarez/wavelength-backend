@@ -1,5 +1,6 @@
 const axios = require('axios');
 const supabase = require('../config/supabase');
+const apolloService = require('./apolloService');
 
 // Adapters per source — each returns array of signal objects
 const adapters = {
@@ -19,6 +20,15 @@ async function runDiscovery(runId, sources) {
       signals.push(...results.map(r => ({ ...r, source, run_id: runId, status: 'new' })));
     } catch (err) {
       console.error(`Discovery source ${source} failed:`, err.message);
+    }
+  }
+
+  // Enrich emails via Apollo for signals that have a founder name but no email
+  if (apolloService.isConfigured()) {
+    for (const signal of signals) {
+      if (signal.founder_name && !signal.founder_email) {
+        signal.founder_email = await apolloService.findEmail(signal.founder_name, signal.company_name);
+      }
     }
   }
 

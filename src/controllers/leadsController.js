@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const phantombusterService = require('../services/phantombusterService');
+const apolloService = require('../services/apolloService');
 const logError = require('../utils/logError');
 
 async function listLeads(req, res) {
@@ -93,9 +94,25 @@ async function enrichLead(req, res) {
 
     const enriched = await phantombusterService.enrichFounder(lead);
 
+    // Try Apollo for email if lead doesn't already have one
+    const updatePayload = {
+      enrichment_data: enriched,
+      enriched_at: new Date().toISOString(),
+      status: 'enriched',
+    };
+    if (!lead.email) {
+      // Phantombuster may return name fields in different shapes depending on agent config
+      const resolvedName = enriched?.name
+        || (enriched?.firstName ? `${enriched.firstName} ${enriched.lastName || ''}`.trim() : null)
+        || lead.name;
+      const resolvedCompany = enriched?.company || lead.company;
+      const apolloEmail = await apolloService.findEmail(resolvedName, resolvedCompany);
+      if (apolloEmail) updatePayload.email = apolloEmail;
+    }
+
     const { data, error: updateError } = await supabase
       .from('leads')
-      .update({ enrichment_data: enriched, enriched_at: new Date().toISOString(), status: 'enriched' })
+      .update(updatePayload)
       .eq('id', req.params.id)
       .select()
       .single();
