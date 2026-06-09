@@ -157,25 +157,19 @@ async function deleteDraft(req, res) {
 
 async function approveAndSend(req, res) {
   try {
-    const { sequence_id } = req.body;
-
     const { data: draft, error } = await supabase
-      .from('outreach_drafts').select('*, leads(*)').eq('id', req.params.draftId).single();
+      .from('outreach_drafts').select('id, lead_id, status').eq('id', req.params.draftId).single();
 
     if (error) { logError('approveAndSend fetch', error); return res.status(404).json({ error: 'Draft not found' }); }
-    if (draft.status !== 'draft') return res.status(400).json({ error: 'Draft already sent or rejected' });
+    if (draft.status !== 'draft') return res.status(400).json({ error: 'Draft already approved or sent' });
 
-    const lemlistResult = await lemlistService.addLeadToSequence(draft.leads, draft, sequence_id);
-
+    // Dismiss sibling drafts for the same lead, then approve this one
     await Promise.all([
-      supabase
-        .from('outreach_drafts')
-        .update({ status: 'sent', sent_at: new Date().toISOString(), lemlist_id: lemlistResult._id })
-        .eq('id', draft.id),
-      supabase.from('leads').update({ status: 'contacted' }).eq('id', draft.lead_id),
+      supabase.from('outreach_drafts').delete().eq('lead_id', draft.lead_id).neq('id', draft.id),
+      supabase.from('outreach_drafts').update({ status: 'approved' }).eq('id', draft.id),
     ]);
 
-    res.json({ success: true, skipped: lemlistResult.skipped ?? false, lemlist: lemlistResult });
+    res.json({ success: true });
   } catch (err) {
     logError('approveAndSend (thrown)', err);
     res.status(500).json({ error: err.message });
