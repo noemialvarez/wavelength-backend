@@ -1,16 +1,39 @@
 const supabase = require('../config/supabase');
 const claudeService = require('../services/claudeService');
 const lemlistService = require('../services/lemlistService');
+const { extractText } = require('../utils/extractText');
 const logError = require('../utils/logError');
+
+// ─── Positioning ─────────────────────────────────────────────────────────────
+
+async function uploadPositioning(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const content = await extractText(req.file.buffer, req.file.mimetype, req.file.originalname);
+    if (!content) return res.status(400).json({ error: 'Could not extract text from file' });
+
+    const { data: existing } = await supabase.from('positioning').select('id').limit(1).maybeSingle();
+
+    const payload = { content, updated_at: new Date().toISOString() };
+    let result;
+    if (existing) {
+      result = await supabase.from('positioning').update(payload).eq('id', existing.id).select().single();
+    } else {
+      result = await supabase.from('positioning').insert(payload).select().single();
+    }
+
+    if (result.error) { logError('uploadPositioning', result.error); return res.status(500).json({ error: result.error.message }); }
+    res.json({ ...result.data, filename: req.file.originalname });
+  } catch (err) {
+    logError('uploadPositioning (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
 
 async function getPositioning(req, res) {
   try {
-    const { data, error } = await supabase
-      .from('positioning')
-      .select('*')
-      .limit(1)
-      .maybeSingle();
-
+    const { data, error } = await supabase.from('positioning').select('*').limit(1).maybeSingle();
     if (error) { logError('getPositioning', error); return res.status(500).json({ error: error.message }); }
     if (!data) return res.status(404).json({ error: 'No positioning file found' });
     res.json(data);
@@ -27,20 +50,12 @@ async function upsertPositioning(req, res) {
 
     const { data: existing } = await supabase.from('positioning').select('id').limit(1).maybeSingle();
 
+    const payload = { content, updated_at: new Date().toISOString() };
     let result;
     if (existing) {
-      result = await supabase
-        .from('positioning')
-        .update({ content, updated_at: new Date().toISOString() })
-        .eq('id', existing.id)
-        .select()
-        .single();
+      result = await supabase.from('positioning').update(payload).eq('id', existing.id).select().single();
     } else {
-      result = await supabase
-        .from('positioning')
-        .insert({ content, updated_at: new Date().toISOString() })
-        .select()
-        .single();
+      result = await supabase.from('positioning').insert(payload).select().single();
     }
 
     if (result.error) { logError('upsertPositioning', result.error); return res.status(400).json({ error: result.error.message }); }
@@ -50,6 +65,8 @@ async function upsertPositioning(req, res) {
     res.status(500).json({ error: err.message });
   }
 }
+
+// ─── Drafts ──────────────────────────────────────────────────────────────────
 
 async function draftEmail(req, res) {
   try {
@@ -63,7 +80,7 @@ async function draftEmail(req, res) {
 
     if (leadError) { logError('draftEmail fetch lead', leadError); return res.status(404).json({ error: 'Lead not found' }); }
     if (posError) { logError('draftEmail fetch positioning', posError); return res.status(500).json({ error: posError.message }); }
-    if (!positioning) return res.status(400).json({ error: 'No positioning file found. Add one first.' });
+    if (!positioning) return res.status(400).json({ error: 'No positioning file found. Upload one in Settings first.' });
 
     const draft = await claudeService.draftOutreachEmail(lead, positioning.content);
 
@@ -106,11 +123,7 @@ async function listDrafts(req, res) {
 async function getDraft(req, res) {
   try {
     const { data, error } = await supabase
-      .from('outreach_drafts')
-      .select('*, leads(*)')
-      .eq('id', req.params.id)
-      .single();
-
+      .from('outreach_drafts').select('*, leads(*)').eq('id', req.params.id).single();
     if (error) { logError('getDraft', error); return res.status(404).json({ error: 'Draft not found' }); }
     res.json(data);
   } catch (err) {
@@ -122,12 +135,7 @@ async function getDraft(req, res) {
 async function updateDraft(req, res) {
   try {
     const { data, error } = await supabase
-      .from('outreach_drafts')
-      .update(req.body)
-      .eq('id', req.params.id)
-      .select()
-      .single();
-
+      .from('outreach_drafts').update(req.body).eq('id', req.params.id).select().single();
     if (error) { logError('updateDraft', error); return res.status(400).json({ error: error.message }); }
     res.json(data);
   } catch (err) {
@@ -149,26 +157,25 @@ async function deleteDraft(req, res) {
 
 async function approveAndSend(req, res) {
   try {
+    const { sequence_id } = req.body;
+
     const { data: draft, error } = await supabase
-      .from('outreach_drafts')
-      .select('*, leads(*)')
-      .eq('id', req.params.draftId)
-      .single();
+      .from('outreach_drafts').select('*, leads(*)').eq('id', req.params.draftId).single();
 
     if (error) { logError('approveAndSend fetch', error); return res.status(404).json({ error: 'Draft not found' }); }
     if (draft.status !== 'draft') return res.status(400).json({ error: 'Draft already sent or rejected' });
 
-    const lemlistResult = await lemlistService.addLeadToSequence(draft.leads, draft);
+    const lemlistResult = await lemlistService.addLeadToSequence(draft.leads, draft, sequence_id);
 
     await Promise.all([
       supabase
         .from('outreach_drafts')
-        .update({ status: 'sent', sent_at: new Date().toISOString(), lemlist_id: lemlistResult.id })
+        .update({ status: 'sent', sent_at: new Date().toISOString(), lemlist_id: lemlistResult._id })
         .eq('id', draft.id),
       supabase.from('leads').update({ status: 'contacted' }).eq('id', draft.lead_id),
     ]);
 
-    res.json({ success: true, lemlist: lemlistResult });
+    res.json({ success: true, skipped: lemlistResult.skipped ?? false, lemlist: lemlistResult });
   } catch (err) {
     logError('approveAndSend (thrown)', err);
     res.status(500).json({ error: err.message });
@@ -176,6 +183,6 @@ async function approveAndSend(req, res) {
 }
 
 module.exports = {
-  getPositioning, upsertPositioning,
+  uploadPositioning, getPositioning, upsertPositioning,
   draftEmail, listDrafts, getDraft, updateDraft, deleteDraft, approveAndSend,
 };
