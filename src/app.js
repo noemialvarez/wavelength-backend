@@ -28,9 +28,11 @@ app.use('/api/outreach', outreachRouter);
 app.use('/api/engagement', engagementRouter);
 app.use('/api/sequences', sequencesRouter);
 
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+app.use((err, req, res, _next) => {
+  console.error(`\n[UNHANDLED ERROR] ${req.method} ${req.originalUrl}`);
+  console.error('  message:', err.message);
+  console.error('  stack:\n', err.stack);
+  res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
 module.exports = app;
