@@ -125,6 +125,29 @@ async function enrichLead(req, res) {
   }
 }
 
+async function findLeadEmail(req, res) {
+  try {
+    if (!apolloService.isConfigured()) {
+      return res.status(400).json({ error: 'APOLLO_API_KEY is not configured' });
+    }
+
+    const { data: lead, error } = await supabase
+      .from('leads').select('id, name, company, email').eq('id', req.params.id).single();
+    if (error) { logError('findLeadEmail fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+
+    const email = await apolloService.findEmail(lead.name, lead.company);
+    if (!email) return res.json({ email: null });
+
+    const { error: updateError } = await supabase.from('leads').update({ email }).eq('id', lead.id);
+    if (updateError) { logError('findLeadEmail update', updateError); return res.status(500).json({ error: updateError.message }); }
+
+    res.json({ email });
+  } catch (err) {
+    logError('findLeadEmail (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
 async function importLeads(req, res) {
   try {
     const { leads } = req.body;
@@ -142,4 +165,4 @@ async function importLeads(req, res) {
   }
 }
 
-module.exports = { listLeads, getLead, createLead, updateLead, deleteLead, enrichLead, importLeads };
+module.exports = { listLeads, getLead, createLead, updateLead, deleteLead, enrichLead, findLeadEmail, importLeads };

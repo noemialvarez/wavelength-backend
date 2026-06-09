@@ -10,6 +10,9 @@ router.delete('/:id', leadsController.deleteLead);
 // Trigger Phantombuster enrichment for a lead
 router.post('/:id/enrich', leadsController.enrichLead);
 
+// Look up email via Apollo on demand
+router.post('/:id/find-email', leadsController.findLeadEmail);
+
 // Bulk import from a discovery run
 router.post('/import', leadsController.importLeads);
 
