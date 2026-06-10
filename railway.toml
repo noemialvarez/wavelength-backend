@@ -1,5 +1,9 @@
 [build]
 builder = "nixpacks"
+nixpacksVersion = "1"
+
+[build.env]
+NODE_VERSION = "20"
 
 [build.cache]
 paths = ["node_modules"]
