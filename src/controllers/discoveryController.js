@@ -90,23 +90,26 @@ async function promoteSignalToLead(req, res) {
     const { data: lead, error: leadError } = await supabase
       .from('leads')
       .insert({
-        name: signal.founder_name,
-        email: signal.founder_email,
+        // name is NOT NULL — use founder_name if available, fall back to company_name
+        name: signal.founder_name || signal.company_name || 'Unknown',
+        email: signal.founder_email || null,
         company: signal.company_name,
-        linkedin_url: signal.linkedin_url,
+        linkedin_url: signal.linkedin_url || null,
         source: signal.source,
         signal_id: signal.id,
-        status: 'new',
+        status: 'enriched',
       })
       .select()
       .single();
 
     if (leadError) { logError('promoteSignalToLead insert', leadError); return res.status(400).json({ error: leadError.message }); }
 
-    await supabase
+    const { error: signalUpdateError } = await supabase
       .from('discovery_signals')
       .update({ status: 'promoted', lead_id: lead.id })
       .eq('id', signal.id);
+
+    if (signalUpdateError) logError('promoteSignalToLead signal update', signalUpdateError);
 
     res.status(201).json(lead);
   } catch (err) {
