@@ -31,11 +31,13 @@ async function runDiscovery(runId, sources) {
 
   if (signals.length > 0) {
     console.log(`[discovery] run=${runId} — inserting ${signals.length} signal(s) into database`);
-    const { error: insertError } = await supabase.from('discovery_signals').insert(signals);
+    console.log(`[discovery] run=${runId} — first signal sample: ${JSON.stringify(signals[0])}`);
+    console.log(`[discovery] run=${runId} — all signal keys: ${Object.keys(signals[0]).join(', ')}`);
+    const { data: insertedData, error: insertError } = await supabase.from('discovery_signals').insert(signals).select();
     if (insertError) {
-      console.error(`[discovery] run=${runId} — Supabase insert error: ${insertError.message}`);
+      console.error(`[discovery] run=${runId} — Supabase insert error: ${JSON.stringify(insertError)}`);
     } else {
-      console.log(`[discovery] run=${runId} — insert successful`);
+      console.log(`[discovery] run=${runId} — insert successful, rows saved: ${insertedData?.length ?? 'unknown'}`);
     }
   } else {
     console.log(`[discovery] run=${runId} — no signals to insert`);
