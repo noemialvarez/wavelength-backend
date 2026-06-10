@@ -1,6 +1,5 @@
 [build]
-builder = "nixpacks"
-nixpacksVersion = "1"
+builder = "railpack"
 
 [build.env]
 NODE_VERSION = "20"
