@@ -39,7 +39,7 @@ async function parseWithClaude(text, sourceLabel, maxChars = 80000) {
 
   const message = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
+    max_tokens: 4096,
     messages: [{
       role: 'user',
       content: `Extract all startup company names mentioned in this text that have recently raised funding or had significant news.
@@ -60,8 +60,10 @@ If none found return: []`,
   });
 
   const raw = message.content[0].text.trim();
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  const match = cleaned.match(/\[[\s\S]*\]/);
+  // Extract content from inside code fences if present (handles text before/after the fence block)
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenceMatch ? fenceMatch[1].trim() : raw;
+  const match = candidate.match(/\[[\s\S]*\]/);
   if (!match) {
     console.warn(`[scanner] parseWithClaude (${sourceLabel}) — no JSON array in response: ${raw.slice(0, 300)}`);
     return [];
