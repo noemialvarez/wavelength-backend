@@ -9,17 +9,22 @@ const adapters = {
 };
 
 async function runDiscovery(runId, sources) {
+  console.log(`[discovery] run=${runId} starting — sources: ${sources.join(', ')}`);
   await supabase.from('discovery_runs').update({ status: 'running' }).eq('id', runId);
 
   const signals = [];
   for (const source of sources) {
     const adapter = adapters[source];
-    if (!adapter) continue;
+    if (!adapter) {
+      console.log(`[discovery] run=${runId} source=${source} — no adapter registered, skipping`);
+      continue;
+    }
     try {
       const results = await adapter();
+      console.log(`[discovery] run=${runId} source=${source} — extracted ${results.length} companies`);
       signals.push(...results.map(r => ({ ...r, source, run_id: runId, status: 'new' })));
     } catch (err) {
-      console.error(`Discovery source ${source} failed:`, err.message);
+      console.error(`[discovery] run=${runId} source=${source} — fetch/parse error: ${err.message}`);
     }
   }
 
@@ -33,31 +38,46 @@ async function runDiscovery(runId, sources) {
   }
 
   if (signals.length > 0) {
-    await supabase.from('discovery_signals').insert(signals);
+    console.log(`[discovery] run=${runId} — inserting ${signals.length} signal(s) into database`);
+    const { error: insertError } = await supabase.from('discovery_signals').insert(signals);
+    if (insertError) {
+      console.error(`[discovery] run=${runId} — Supabase insert error: ${insertError.message}`);
+    } else {
+      console.log(`[discovery] run=${runId} — insert successful`);
+    }
+  } else {
+    console.log(`[discovery] run=${runId} — no signals to insert`);
   }
 
   await supabase
     .from('discovery_runs')
     .update({ status: 'completed', signal_count: signals.length, completed_at: new Date().toISOString() })
     .eq('id', runId);
+
+  console.log(`[discovery] run=${runId} — completed, total signals: ${signals.length}`);
 }
 
 async function fetchWellfound() {
-  // Wellfound doesn't have a public API — scraping or using their GraphQL endpoint
-  // requires auth cookies. Return empty until a real session is configured.
-  // TODO: implement via Phantombuster scraper agent or partner API
+  console.log('[discovery] fetchWellfound — no adapter implemented, returning empty');
   return [];
 }
 
 async function fetchStartupticker() {
-  // Startupticker.ch has an RSS feed for news
-  const { data } = await axios.get('https://www.startupticker.ch/en/news.rss', {
-    timeout: 10000,
-  });
+  const url = 'https://www.startupticker.ch/en/news.rss';
+  console.log(`[discovery] fetchStartupticker — fetching ${url}`);
 
-  // Very basic RSS parse — replace with rss-parser if needed
+  let response;
+  try {
+    response = await axios.get(url, { timeout: 10000 });
+    console.log(`[discovery] fetchStartupticker — HTTP ${response.status} from ${url}`);
+  } catch (err) {
+    const status = err.response?.status;
+    console.error(`[discovery] fetchStartupticker — fetch error${status ? ` (HTTP ${status})` : ''}: ${err.message}`);
+    throw err;
+  }
+
+  const entries = (response.data.match(/<item>([\s\S]*?)<\/item>/g) || []);
   const items = [];
-  const entries = data.match(/<item>([\s\S]*?)<\/item>/g) || [];
   for (const entry of entries.slice(0, 20)) {
     const title = (entry.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || [])[1] || '';
     const link = (entry.match(/<link>(.*?)<\/link>/) || [])[1] || '';
@@ -73,6 +93,8 @@ async function fetchStartupticker() {
       });
     }
   }
+
+  console.log(`[discovery] fetchStartupticker — parsed ${items.length} companies from ${entries.length} feed entries`);
   return items;
 }
 
