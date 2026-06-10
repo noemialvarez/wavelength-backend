@@ -9,7 +9,7 @@ const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // e.g. "Startupticker.ch" → "startupticker.ch", "Wellfound" → "wellfound"
 const adapters = {
   'startupticker.ch': fetchStartupticker,
-  wellfound: fetchWellfound,
+  wellfound: fetchTechCrunchStartups,
 };
 
 function hasAdapter(source) {
@@ -33,8 +33,8 @@ function stripHtml(html) {
     .trim();
 }
 
-async function parseWithClaude(text, sourceLabel) {
-  const truncated = text.slice(0, 80000);
+async function parseWithClaude(text, sourceLabel, maxChars = 80000) {
+  const truncated = text.slice(0, maxChars);
   console.log(`[scanner] parseWithClaude (${sourceLabel}) — sending ${truncated.length} chars to Claude`);
 
   const message = await anthropic.messages.create({
@@ -42,20 +42,20 @@ async function parseWithClaude(text, sourceLabel) {
     max_tokens: 2048,
     messages: [{
       role: 'user',
-      content: `Extract startup signal data from this web page content.
+      content: `Extract all startup company names mentioned in this text that have recently raised funding or had significant news.
 
 Source: ${sourceLabel}
 Page content:
 ${truncated}
 
-Return a JSON array of recently funded or newsworthy startups. For each include:
+Return a JSON array of objects with fields: company_name, signal_description, signal_type, source_url.
 - company_name: the startup name
 - signal_description: one sentence describing the signal (e.g. "Raised CHF 4M seed round led by Redalpine")
 - signal_type: one of "Funding", "Key hire", "Product launch", "Other"
 - source_url: the article or announcement URL if visible, otherwise null
 
 Respond with ONLY a valid JSON array — no markdown, no explanation.
-If no startups are found return: []`,
+If none found return: []`,
     }],
   });
 
@@ -104,18 +104,18 @@ async function fetchStartupticker() {
   const html = await fetchPage(url, 'fetchStartupticker');
   const text = stripHtml(html);
   console.log(`[scanner] fetchStartupticker — ${text.length} chars after stripping HTML`);
-  const extracted = await parseWithClaude(text, 'Startupticker.ch');
+  const extracted = await parseWithClaude(text, 'Startupticker.ch', 15000);
   console.log(`[scanner] fetchStartupticker — Claude extracted ${extracted.length} companies`);
   return toSignals(extracted, url);
 }
 
-async function fetchWellfound() {
-  const url = 'https://wellfound.com/companies?filter_recently_funded=true';
-  const html = await fetchPage(url, 'fetchWellfound');
+async function fetchTechCrunchStartups() {
+  const url = 'https://techcrunch.com/tag/startups/';
+  const html = await fetchPage(url, 'fetchTechCrunchStartups');
   const text = stripHtml(html);
-  console.log(`[scanner] fetchWellfound — ${text.length} chars after stripping HTML`);
-  const extracted = await parseWithClaude(text, 'Wellfound');
-  console.log(`[scanner] fetchWellfound — Claude extracted ${extracted.length} companies`);
+  console.log(`[scanner] fetchTechCrunchStartups — ${text.length} chars after stripping HTML`);
+  const extracted = await parseWithClaude(text, 'TechCrunch Startups', 15000);
+  console.log(`[scanner] fetchTechCrunchStartups — Claude extracted ${extracted.length} companies`);
   return toSignals(extracted, url);
 }
 
