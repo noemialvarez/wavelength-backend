@@ -115,4 +115,19 @@ async function promoteSignalToLead(req, res) {
   }
 }
 
-module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead };
+async function dismissSignal(req, res) {
+  try {
+    const { error } = await supabase
+      .from('discovery_signals')
+      .update({ status: 'dismissed' })
+      .eq('id', req.params.id);
+
+    if (error) { logError('dismissSignal', error); return res.status(500).json({ error: error.message }); }
+    res.json({ ok: true });
+  } catch (err) {
+    logError('dismissSignal (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal };

@@ -10,5 +10,6 @@ router.get('/runs/:id', discoveryController.getRun);
 // Raw signals before they become leads
 router.get('/signals', discoveryController.listSignals);
 router.post('/signals/:id/promote', discoveryController.promoteSignalToLead);
+router.post('/signals/:id/dismiss', discoveryController.dismissSignal);
 
 module.exports = router;
