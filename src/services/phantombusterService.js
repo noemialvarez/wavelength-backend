@@ -20,7 +20,7 @@ async function launchAgent(agentId, args = {}) {
 async function waitForAgent(agentId, containerId, pollMs = 3000, maxWaitMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    const { data } = await pb.get(`/containers/${containerId}`);
+    const { data } = await pb.get(`/containers/fetch-output?id=${containerId}`);
     if (data.status === 'finished') return data;
     if (data.status === 'error') throw new Error(`Phantombuster agent error: ${data.output}`);
     await new Promise(r => setTimeout(r, pollMs));
