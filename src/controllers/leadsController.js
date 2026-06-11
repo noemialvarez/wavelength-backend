@@ -89,10 +89,10 @@ async function deleteLead(req, res) {
 
 function founderPayload(result) {
   if (!result) return null;
-  const nameParts = [result.firstName, result.lastName].filter(Boolean);
-  const name = result.name || (nameParts.length ? nameParts.join(' ') : null);
-  const linkedin_url = result.profileUrl || result.linkedinUrl || result.url || null;
-  const payload = {};
+  var nameParts = [result.firstName, result.lastName].filter(Boolean);
+  var name = result.name ? result.name : (nameParts.length ? nameParts.join(' ') : null);
+  var linkedin_url = result.profileUrl ? result.profileUrl : (result.linkedinUrl ? result.linkedinUrl : (result.url ? result.url : null));
+  var payload = {};
   if (name) payload.name = name;
   if (linkedin_url) payload.linkedin_url = linkedin_url;
   return Object.keys(payload).length ? payload : null;
