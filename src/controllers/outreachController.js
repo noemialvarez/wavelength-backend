@@ -1,6 +1,6 @@
 const supabase = require('../config/supabase');
 const claudeService = require('../services/claudeService');
-const lemlistService = require('../services/lemlistService');
+const lemlist = require('../services/lemlistService');
 const { extractText } = require('../utils/extractText');
 const logError = require('../utils/logError');
 
@@ -208,11 +208,21 @@ async function deleteDraft(req, res) {
 
 async function approveAndSend(req, res) {
   try {
+    const rawKey = process.env.LEMLIST_API_KEY;
+    console.log(`[approveAndSend] LEMLIST_API_KEY: ${rawKey ? `set (length=${rawKey.length}, prefix=${rawKey.slice(0, 6)}…)` : 'NOT SET'}`);
+
     const { data: draft, error } = await supabase
-      .from('outreach_drafts').select('id, lead_id, status').eq('id', req.params.draftId).single();
+      .from('outreach_drafts')
+      .select('id, lead_id, status, subject, body, leads(id, name, email, company, linkedin_url)')
+      .eq('id', req.params.draftId)
+      .single();
 
     if (error) { logError('approveAndSend fetch', error); return res.status(404).json({ error: 'Draft not found' }); }
     if (draft.status !== 'draft') return res.status(400).json({ error: 'Draft already approved or sent' });
+
+    const { data: settings } = await supabase.from('positioning').select('lemlist_campaign_id').limit(1).maybeSingle();
+    const campaignId = settings?.lemlist_campaign_id || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
+    console.log(`[approveAndSend] campaignId: ${campaignId || 'none'}`);
 
     // Dismiss sibling drafts for the same lead, then approve this one
     await Promise.all([
@@ -220,7 +230,10 @@ async function approveAndSend(req, res) {
       supabase.from('outreach_drafts').update({ status: 'approved' }).eq('id', draft.id),
     ]);
 
-    res.json({ success: true });
+    const lemlistResult = await lemlist.addLeadToSequence(draft.leads, draft, campaignId);
+    console.log(`[approveAndSend] Lemlist result: ${JSON.stringify(lemlistResult)}`);
+
+    res.json({ success: true, pushed: !lemlistResult.skipped, lemlist: lemlistResult });
   } catch (err) {
     logError('approveAndSend (thrown)', err);
     res.status(500).json({ error: err.message });
