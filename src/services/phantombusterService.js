@@ -56,7 +56,7 @@ function pickFounder(results) {
 
 async function fetchS3Results(outputText) {
   console.log('[phantombuster] agent output text:', outputText);
-  var match = (outputText || '').match(/JSON saved at (https:\/\/\S+)/);
+  var match = (outputText || '').match(/JSON saved at (https:\/\/phantombuster\.s3\.amazonaws\.com\/[^\s\r\n]+\.json)/);
   if (!match) {
     console.log('[phantombuster] no S3 URL found in output text');
     return [];
@@ -65,7 +65,8 @@ async function fetchS3Results(outputText) {
   console.log('[phantombuster] fetching S3 URL:', s3Url);
   var response = await axios.get(s3Url);
   var profiles = Array.isArray(response.data) ? response.data : [];
-  console.log('[phantombuster] fetched profiles from S3:', JSON.stringify(profiles));
+  console.log('[phantombuster] fetched profiles count:', profiles.length);
+  console.log('[phantombuster] first profile:', JSON.stringify(profiles[0]));
   return profiles;
 }
 
