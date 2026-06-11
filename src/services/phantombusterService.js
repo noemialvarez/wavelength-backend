@@ -39,10 +39,15 @@ async function getAgentOutput(agentId) {
 }
 
 function pickFounder(results) {
-  var founderRe = /co[\s-]?founder|founder|ceo/i;
+  console.log('[phantombuster] profiles count:', results.length);
+  if (results.length > 0) {
+    console.log('[phantombuster] first profile keys:', Object.keys(results[0]));
+    console.log('[phantombuster] profiles array:', JSON.stringify(results));
+  }
+  var leaderRe = /founder|co.founder|ceo|chief executive|president/i;
   var founderMatch = results.find(function(r) {
-    var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : ''));
-    return founderRe.test(title);
+    var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : (r.jobTitle ? r.jobTitle : '')));
+    return leaderRe.test(title);
   });
   var finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
   console.log('[phantombuster] picked result:', JSON.stringify(finalResult));
