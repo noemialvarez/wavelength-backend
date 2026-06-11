@@ -143,6 +143,8 @@ create table if not exists sequence_leads (
   lemlist_lead_id  text,
   lead_id          uuid references leads(id) on delete set null,
   email            text,
+  name             text,
+  company          text,
   status           text,
   step             text,
   last_event_at    timestamptz,

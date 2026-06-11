@@ -105,15 +105,26 @@ async function syncFromLemlist(req, res) {
     // Fetch all leads for this campaign from Lemlist
     const rawLeads = await lemlistService.getCampaignLeads(campaignId);
     console.log(`[syncFromLemlist] fetched ${rawLeads.length} leads from Lemlist`);
+    if (rawLeads.length > 0) {
+      console.log(`[syncFromLemlist] sample lead fields: ${JSON.stringify(rawLeads[0])}`);
+    }
 
-    const leadRows = rawLeads.map(l => ({
-      sequence_id: seq.id,
-      lemlist_lead_id: l._id,
-      email: l.email,
-      status: mapStatus(l.status),
-      step: String(l.currentStep ?? l.step ?? ''),
-      last_event_at: l.lastEmailSentAt ?? l.updatedAt ?? null,
-    }));
+    const leadRows = rawLeads.map(l => {
+      const firstName = l.firstName ?? l.first_name ?? '';
+      const lastName  = l.lastName  ?? l.last_name  ?? '';
+      const name      = [firstName, lastName].filter(Boolean).join(' ') || l.email || '';
+      const company   = l.companyName ?? l.company_name ?? l.company ?? '';
+      return {
+        sequence_id:     seq.id,
+        lemlist_lead_id: l._id,
+        email:           l.email,
+        name,
+        company,
+        status:          mapStatus(l.status),
+        step:            String(l.currentStep ?? l.step ?? ''),
+        last_event_at:   l.lastEmailSentAt ?? l.updatedAt ?? null,
+      };
+    });
 
     const { error: leadErr } = await supabase
       .from('sequence_leads')
