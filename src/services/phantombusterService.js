@@ -6,7 +6,7 @@ const pb = axios.create({
 });
 
 async function launchAgent(agentId, args = {}) {
-  const { data } = await pb.post(`/agents/${agentId}/launch`, { arguments: args });
+  const { data } = await pb.post('/agents/launch', { id: agentId, argument: JSON.stringify(args) });
   return data;
 }
 
