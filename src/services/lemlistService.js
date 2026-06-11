@@ -34,8 +34,8 @@ async function getCampaignLeads(campaignId) {
   return data;
 }
 
-async function addLeadToSequence(lead, draft, sequenceId) {
-  const campaignId = sequenceId || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
+async function addLeadToSequence(lead, draft, campaignId) {
+  campaignId = campaignId || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
 
   if (!isConfigured()) {
     console.log(`[Lemlist] API key not configured — skipping push for ${lead?.email} (campaign: ${campaignId || 'none'})`);
@@ -43,7 +43,7 @@ async function addLeadToSequence(lead, draft, sequenceId) {
   }
 
   if (!campaignId) {
-    console.log(`[Lemlist] No sequence ID provided — skipping push for ${lead?.email}`);
+    console.log(`[Lemlist] No campaign ID provided — skipping push for ${lead?.email}`);
     return { _id: `skipped_${Date.now()}`, skipped: true, reason: 'No sequence ID — add one in Settings' };
   }
 
