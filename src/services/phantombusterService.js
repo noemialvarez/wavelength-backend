@@ -34,24 +34,30 @@ async function getAgentOutput(agentId) {
   return data;
 }
 
-function parseFounderOutput(outputStr) {
-  var lines = (outputStr || '').split('\n').filter(Boolean);
-  var results = [];
-  for (var i = 0; i < lines.length; i++) {
-    try {
-      var parsed = JSON.parse(lines[i]);
-      if (Array.isArray(parsed)) results.push.apply(results, parsed);
-      else results.push(parsed);
-    } catch (e) {}
-  }
+function pickFounder(results) {
   var founderRe = /co[\s-]?founder|founder|ceo/i;
   var founderMatch = results.find(function(r) {
     var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : ''));
     return founderRe.test(title);
   });
   var finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
-  console.log('[phantombuster] parsed result:', JSON.stringify(finalResult));
+  console.log('[phantombuster] picked result:', JSON.stringify(finalResult));
   return finalResult;
+}
+
+async function fetchAgentResults(agentId) {
+  const { data } = await pb.get(`/agents/fetch-output?id=${agentId}`);
+  console.log('[phantombuster] fetch-output response:', JSON.stringify(data));
+  var profiles = [];
+  if (data.resultObject) {
+    try {
+      var parsed = typeof data.resultObject === 'string' ? JSON.parse(data.resultObject) : data.resultObject;
+      profiles = Array.isArray(parsed) ? parsed : (parsed.profiles ? parsed.profiles : [parsed]);
+    } catch (e) {
+      console.log('[phantombuster] could not parse resultObject:', e.message);
+    }
+  }
+  return profiles;
 }
 
 async function launchFounderSearch(companyName) {
@@ -60,11 +66,13 @@ async function launchFounderSearch(companyName) {
   // Use cached results from last run if less than 24 hours old
   try {
     const { data: cached } = await pb.get(`/agents/fetch-output?id=${agentId}`);
+    console.log('[phantombuster] cached fetch-output response:', JSON.stringify(cached));
     const endedAt = cached.endedAt ? new Date(cached.endedAt).getTime() : 0;
     const ageMs = Date.now() - endedAt;
-    if (cached.output && ageMs < 24 * 60 * 60 * 1000) {
+    if (cached.resultObject && ageMs < 24 * 60 * 60 * 1000) {
       console.log('[phantombuster] using cached results, age:', Math.round(ageMs / 60000), 'min');
-      return parseFounderOutput(cached.output);
+      const profiles = await fetchAgentResults(agentId);
+      return pickFounder(profiles);
     }
     console.log('[phantombuster] cached results too old or missing, launching new run');
   } catch (e) {
@@ -80,8 +88,9 @@ async function launchFounderSearch(companyName) {
     numberOfResultsPerSearch: 10,
   });
 
-  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
-  return parseFounderOutput(agentOutput.output);
+  await waitForAgent(agentId, launch.containerId, 5000, 180000);
+  const profiles = await fetchAgentResults(agentId);
+  return pickFounder(profiles);
 }
 
 async function enrichFounder(lead) {
