@@ -12,7 +12,7 @@ async function launchAgent(agentId, args = {}) {
     const { data } = await pb.post('/agents/launch', body);
     return data;
   } catch (error) {
-    console.log('[phantombuster] error response:', error.response?.data);
+    console.log('[phantombuster] error response:', error.response ? error.response.data : null);
     throw error;
   }
 }
@@ -45,9 +45,9 @@ async function launchFounderSearch(companyName) {
     numberOfResultsPerSearch: 10,
   });
 
-  const result = await waitForAgent(agentId, launch.containerId, 5000, 60000);
+  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 60000);
 
-  const lines = (result.output || '').split('\n').filter(Boolean);
+  const lines = (agentOutput.output || '').split('\n').filter(Boolean);
   const results = [];
   for (const line of lines) {
     try {
@@ -58,9 +58,13 @@ async function launchFounderSearch(companyName) {
   }
 
   const founderRe = /co[\s-]?founder|founder|ceo/i;
-  const result = results.find(r => founderRe.test(r.title ?? r.occupation ?? r.currentJob ?? '')) ?? results[0] ?? null;
-  console.log('[phantombuster] parsed result:', JSON.stringify(result));
-  return result;
+  const founderMatch = results.find(function(r) {
+    var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : ''));
+    return founderRe.test(title);
+  });
+  const finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
+  console.log('[phantombuster] parsed result:', JSON.stringify(finalResult));
+  return finalResult;
 }
 
 async function enrichFounder(lead) {
