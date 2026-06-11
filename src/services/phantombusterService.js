@@ -21,6 +21,7 @@ async function waitForAgent(agentId, containerId, pollMs = 5000, maxWaitMs = 180
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const { data } = await pb.get(`/containers/fetch-output?id=${containerId}`);
+    console.log('[phantombuster] container output:', JSON.stringify(data));
     if (data.status === 'finished') return data;
     if (data.status === 'error') throw new Error(`Phantombuster agent error: ${data.output}`);
     await new Promise(r => setTimeout(r, pollMs));
@@ -57,11 +58,9 @@ async function launchFounderSearch(companyName) {
   }
 
   const founderRe = /co[\s-]?founder|founder|ceo/i;
-  return (
-    results.find(r => founderRe.test(r.title ?? r.occupation ?? r.currentJob ?? ''))
-    ?? results[0]
-    ?? null
-  );
+  const result = results.find(r => founderRe.test(r.title ?? r.occupation ?? r.currentJob ?? '')) ?? results[0] ?? null;
+  console.log('[phantombuster] parsed result:', JSON.stringify(result));
+  return result;
 }
 
 async function enrichFounder(lead) {
