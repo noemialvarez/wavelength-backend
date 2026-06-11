@@ -7,6 +7,9 @@ router.post('/', leadsController.createLead);
 router.patch('/:id', leadsController.updateLead);
 router.delete('/:id', leadsController.deleteLead);
 
+// Find founder via Phantombuster LinkedIn Search Export
+router.post('/:id/find-founder', leadsController.findFounder);
+
 // Trigger Phantombuster enrichment for a lead
 router.post('/:id/enrich', leadsController.enrichLead);
 

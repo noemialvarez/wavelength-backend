@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const discoveryService = require('../services/discoveryService');
+const phantombusterService = require('../services/phantombusterService');
 const logError = require('../utils/logError');
 
 async function listRuns(req, res) {
@@ -110,6 +111,25 @@ async function promoteSignalToLead(req, res) {
       .eq('id', signal.id);
 
     if (signalUpdateError) logError('promoteSignalToLead signal update', signalUpdateError);
+
+    // Auto-enrich: search LinkedIn for the founder in the background
+    if (signal.company_name && process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID) {
+      phantombusterService.launchFounderSearch(signal.company_name)
+        .then(result => {
+          if (!result) return;
+          const name = result.name ?? [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
+          const linkedin_url = result.profileUrl ?? result.linkedinUrl ?? result.url ?? null;
+          const patch = {};
+          if (name && !signal.founder_name) patch.name = name;
+          if (linkedin_url) patch.linkedin_url = linkedin_url;
+          if (Object.keys(patch).length) {
+            supabase.from('leads').update(patch).eq('id', lead.id)
+              .then(() => console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data`))
+              .catch(e => logError('promoteSignalToLead auto-enrich update', e));
+          }
+        })
+        .catch(e => logError('promoteSignalToLead launchFounderSearch', e));
+    }
 
     res.status(201).json(lead);
   } catch (err) {

@@ -21,6 +21,42 @@ async function waitForAgent(agentId, containerId, pollMs = 3000, maxWaitMs = 600
   throw new Error('Phantombuster agent timed out');
 }
 
+async function getAgentOutput(agentId) {
+  const { data } = await pb.get(`/agents/${agentId}/output`);
+  return data;
+}
+
+async function launchFounderSearch(companyName) {
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+  const searchUrl =
+    `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+
+  const launch = await launchAgent(agentId, {
+    searches: searchUrl,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    numberOfResultsPerSearch: 10,
+  });
+
+  const result = await waitForAgent(agentId, launch.containerId, 5000, 60000);
+
+  const lines = (result.output || '').split('\n').filter(Boolean);
+  const results = [];
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      if (Array.isArray(parsed)) results.push(...parsed);
+      else results.push(parsed);
+    } catch {}
+  }
+
+  const founderRe = /co[\s-]?founder|founder|ceo/i;
+  return (
+    results.find(r => founderRe.test(r.title ?? r.occupation ?? r.currentJob ?? ''))
+    ?? results[0]
+    ?? null
+  );
+}
+
 async function enrichFounder(lead) {
   const launch = await launchAgent(process.env.PHANTOMBUSTER_SALES_NAV_AGENT_ID, {
     profileUrl: lead.linkedin_url,
@@ -65,4 +101,4 @@ async function postLinkedInComment(postUrl, commentText) {
   return waitForAgent(agentId, launch.containerId);
 }
 
-module.exports = { enrichFounder, fetchLinkedInActivity, postLinkedInComment };
+module.exports = { getAgentOutput, launchFounderSearch, enrichFounder, fetchLinkedInActivity, postLinkedInComment };

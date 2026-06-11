@@ -87,6 +87,38 @@ async function deleteLead(req, res) {
   }
 }
 
+function founderPayload(result) {
+  if (!result) return null;
+  const name = result.name
+    ?? [result.firstName, result.lastName].filter(Boolean).join(' ')
+    || null;
+  const linkedin_url = result.profileUrl ?? result.linkedinUrl ?? result.url ?? null;
+  const payload = {};
+  if (name) payload.name = name;
+  if (linkedin_url) payload.linkedin_url = linkedin_url;
+  return Object.keys(payload).length ? payload : null;
+}
+
+async function findFounder(req, res) {
+  try {
+    const { data: lead, error } = await supabase.from('leads').select('id, company').eq('id', req.params.id).single();
+    if (error) { logError('findFounder fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+
+    const result = await phantombusterService.launchFounderSearch(lead.company);
+    const payload = founderPayload(result);
+
+    if (payload) {
+      const { error: updateErr } = await supabase.from('leads').update(payload).eq('id', lead.id);
+      if (updateErr) { logError('findFounder update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+    }
+
+    res.json({ found: !!payload, ...(payload ?? {}) });
+  } catch (err) {
+    logError('findFounder (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
 async function enrichLead(req, res) {
   try {
     const { data: lead, error } = await supabase.from('leads').select('*').eq('id', req.params.id).single();
@@ -165,4 +197,4 @@ async function importLeads(req, res) {
   }
 }
 
-module.exports = { listLeads, getLead, createLead, updateLead, deleteLead, enrichLead, findLeadEmail, importLeads };
+module.exports = { listLeads, getLead, createLead, updateLead, deleteLead, findFounder, enrichLead, findLeadEmail, importLeads };
