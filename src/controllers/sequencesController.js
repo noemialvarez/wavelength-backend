@@ -107,22 +107,31 @@ async function syncFromLemlist(req, res) {
     console.log(`[syncFromLemlist] fetched ${leads.length} leads from Lemlist`);
     console.log('[syncFromLemlist] first lead raw:', JSON.stringify(leads[0]));
 
-    const leadRows = leads.map(l => {
-      const firstName = l.firstName ?? l.first_name ?? '';
-      const lastName  = l.lastName  ?? l.last_name  ?? '';
-      const name      = [firstName, lastName].filter(Boolean).join(' ') || l.email || '';
-      const company   = l.companyName ?? l.company_name ?? l.company ?? '';
-      return {
+    const leadRows = [];
+    for (const l of leads) {
+      let contact = null;
+      if (l.contactId) {
+        try {
+          contact = await lemlistService.getContact(l.contactId);
+          console.log(`[syncFromLemlist] contact ${l.contactId}:`, JSON.stringify(contact));
+        } catch (err) {
+          console.error(`[syncFromLemlist] failed to fetch contact ${l.contactId}:`, err.message);
+        }
+      }
+      const firstName = contact?.firstName ?? '';
+      const lastName  = contact?.lastName  ?? '';
+      const name      = [firstName, lastName].filter(Boolean).join(' ') || contact?.email || '';
+      leadRows.push({
         sequence_id:     seq.id,
         lemlist_lead_id: l._id,
-        email:           l.email,
+        email:           contact?.email ?? '',
         name,
-        company,
-        status:          mapStatus(l.status),
+        company:         contact?.companyName ?? '',
+        status:          mapStatus(l.state ?? l.status),
         step:            String(l.currentStep ?? l.step ?? ''),
         last_event_at:   l.lastEmailSentAt ?? l.updatedAt ?? null,
-      };
-    });
+      });
+    }
 
     const { error: leadErr } = await supabase
       .from('sequence_leads')
