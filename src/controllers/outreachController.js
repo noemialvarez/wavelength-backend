@@ -66,6 +66,45 @@ async function upsertPositioning(req, res) {
   }
 }
 
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+async function getSettings(req, res) {
+  try {
+    const { data, error } = await supabase.from('positioning').select('lemlist_campaign_id').limit(1).maybeSingle();
+    if (error) { logError('getSettings', error); return res.status(500).json({ error: error.message }); }
+    res.json({ lemlist_campaign_id: data?.lemlist_campaign_id ?? '' });
+  } catch (err) {
+    logError('getSettings (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function upsertCampaignId(req, res) {
+  try {
+    const { lemlist_campaign_id } = req.body;
+    if (lemlist_campaign_id === undefined) return res.status(400).json({ error: 'lemlist_campaign_id is required' });
+
+    const { data: existing } = await supabase.from('positioning').select('id').limit(1).maybeSingle();
+
+    let result;
+    if (existing) {
+      result = await supabase.from('positioning')
+        .update({ lemlist_campaign_id, updated_at: new Date().toISOString() })
+        .eq('id', existing.id).select('lemlist_campaign_id').single();
+    } else {
+      result = await supabase.from('positioning')
+        .insert({ lemlist_campaign_id, content: '', updated_at: new Date().toISOString() })
+        .select('lemlist_campaign_id').single();
+    }
+
+    if (result.error) { logError('upsertCampaignId', result.error); return res.status(500).json({ error: result.error.message }); }
+    res.json(result.data);
+  } catch (err) {
+    logError('upsertCampaignId (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
 // ─── Drafts ──────────────────────────────────────────────────────────────────
 
 async function draftEmail(req, res) {
@@ -178,5 +217,6 @@ async function approveAndSend(req, res) {
 
 module.exports = {
   uploadPositioning, getPositioning, upsertPositioning,
+  getSettings, upsertCampaignId,
   draftEmail, listDrafts, getDraft, updateDraft, deleteDraft, approveAndSend,
 };

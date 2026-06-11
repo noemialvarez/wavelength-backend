@@ -25,6 +25,10 @@ router.post('/positioning/upload', upload.single('file'), outreachController.upl
 router.get('/positioning', outreachController.getPositioning);
 router.put('/positioning', outreachController.upsertPositioning);
 
+// Settings (campaign ID etc.)
+router.get('/settings', outreachController.getSettings);
+router.put('/settings', outreachController.upsertCampaignId);
+
 // Draft email for a lead via Claude
 router.post('/draft', outreachController.draftEmail);
 

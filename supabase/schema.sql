@@ -65,10 +65,11 @@ create index on discovery_signals(status);
 -- 3. OUTREACH
 -- ============================================================
 create table if not exists positioning (
-  id         uuid primary key default gen_random_uuid(),
-  user_id    uuid references auth.users(id) on delete cascade unique,
-  content    text not null,
-  updated_at timestamptz not null default now()
+  id                   uuid primary key default gen_random_uuid(),
+  user_id              uuid references auth.users(id) on delete cascade unique,
+  content              text not null,
+  lemlist_campaign_id  text,
+  updated_at           timestamptz not null default now()
 );
 
 create table if not exists outreach_drafts (
