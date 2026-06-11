@@ -6,8 +6,15 @@ const pb = axios.create({
 });
 
 async function launchAgent(agentId, args = {}) {
-  const { data } = await pb.post('/agents/launch', { id: agentId, argument: JSON.stringify(args) });
-  return data;
+  const body = { id: agentId, argument: JSON.stringify(args) };
+  console.log('[phantombuster] request body:', JSON.stringify(body));
+  try {
+    const { data } = await pb.post('/agents/launch', body);
+    return data;
+  } catch (error) {
+    console.log('[phantombuster] error response:', error.response?.data);
+    throw error;
+  }
 }
 
 async function waitForAgent(agentId, containerId, pollMs = 3000, maxWaitMs = 60000) {
