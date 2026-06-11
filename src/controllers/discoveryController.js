@@ -117,8 +117,8 @@ async function promoteSignalToLead(req, res) {
       phantombusterService.launchFounderSearch(signal.company_name)
         .then(result => {
           if (!result) return;
-          const name = result.name ?? [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
-          const linkedin_url = result.profileUrl ?? result.linkedinUrl ?? result.url ?? null;
+          const name = result.name || [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
+          const linkedin_url = result.profileUrl || result.linkedinUrl || result.url || null;
           const patch = {};
           if (name && !signal.founder_name) patch.name = name;
           if (linkedin_url) patch.linkedin_url = linkedin_url;

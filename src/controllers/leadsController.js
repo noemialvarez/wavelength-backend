@@ -90,9 +90,9 @@ async function deleteLead(req, res) {
 function founderPayload(result) {
   if (!result) return null;
   const name = result.name
-    ?? [result.firstName, result.lastName].filter(Boolean).join(' ')
+    || [result.firstName, result.lastName].filter(Boolean).join(' ')
     || null;
-  const linkedin_url = result.profileUrl ?? result.linkedinUrl ?? result.url ?? null;
+  const linkedin_url = result.profileUrl || result.linkedinUrl || result.url || null;
   const payload = {};
   if (name) payload.name = name;
   if (linkedin_url) payload.linkedin_url = linkedin_url;
@@ -112,7 +112,7 @@ async function findFounder(req, res) {
       if (updateErr) { logError('findFounder update', updateErr); return res.status(500).json({ error: updateErr.message }); }
     }
 
-    res.json({ found: !!payload, ...(payload ?? {}) });
+    res.json({ found: !!payload, ...(payload || {}) });
   } catch (err) {
     logError('findFounder (thrown)', err);
     res.status(500).json({ error: err.message });
