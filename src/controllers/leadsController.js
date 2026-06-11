@@ -100,6 +100,7 @@ function founderPayload(result) {
 
 async function findFounder(req, res) {
   try {
+    console.log('[findFounder] looking for lead id:', req.params.id);
     const { data: lead, error } = await supabase.from('leads').select('id, company').eq('id', req.params.id).single();
     if (error) { logError('findFounder fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
 
