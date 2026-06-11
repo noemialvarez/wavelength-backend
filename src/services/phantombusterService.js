@@ -20,10 +20,14 @@ async function launchAgent(agentId, args = {}) {
 async function waitForAgent(agentId, containerId, pollMs = 5000, maxWaitMs = 180000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    const { data } = await pb.get(`/containers/fetch-output?id=${containerId}`);
-    console.log('[phantombuster] container output:', JSON.stringify(data));
-    if (data.status === 'finished') return data;
-    if (data.status === 'error') throw new Error(`Phantombuster agent error: ${data.output}`);
+    const { data } = await pb.get(`/containers/fetch?id=${containerId}`);
+    console.log('[phantombuster] container status:', data.status, '| containerId:', containerId);
+    if (data.status === 'finished') {
+      const { data: output } = await pb.get(`/agents/fetch-output?id=${agentId}`);
+      console.log('[phantombuster] fetch-output response:', JSON.stringify(output));
+      return output;
+    }
+    if (data.status === 'error') throw new Error(`Phantombuster agent error: ${JSON.stringify(data)}`);
     await new Promise(r => setTimeout(r, pollMs));
   }
   throw new Error('Phantombuster agent timed out');
@@ -88,8 +92,16 @@ async function launchFounderSearch(companyName) {
     numberOfResultsPerSearch: 10,
   });
 
-  await waitForAgent(agentId, launch.containerId, 5000, 180000);
-  const profiles = await fetchAgentResults(agentId);
+  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
+  var profiles = [];
+  if (agentOutput.resultObject) {
+    try {
+      var parsed = typeof agentOutput.resultObject === 'string' ? JSON.parse(agentOutput.resultObject) : agentOutput.resultObject;
+      profiles = Array.isArray(parsed) ? parsed : (parsed.profiles ? parsed.profiles : [parsed]);
+    } catch (e) {
+      console.log('[phantombuster] could not parse resultObject:', e.message);
+    }
+  }
   return pickFounder(profiles);
 }
 
