@@ -102,15 +102,13 @@ async function syncFromLemlist(req, res) {
       .from('sequences').select('id').eq('lemlist_id', campaignId).single();
     if (fetchSeqErr) { logError('syncFromLemlist fetch seq row', fetchSeqErr); return res.status(500).json({ error: fetchSeqErr.message }); }
 
-    // Fetch leads from Lemlist — only _id and state are available; name/email/company
-    // come from our local sequence_leads rows written at push time.
+    // Fetch leads from Lemlist — only _id and state are available
     const leads = await lemlistService.getCampaignLeads(campaignId);
     console.log(`[syncFromLemlist] fetched ${leads.length} leads from Lemlist`);
     console.log('[syncFromLemlist] first lead raw:', JSON.stringify(leads[0]));
 
-    // Only update status/step/last_event_at — do not overwrite email/name/company
-    // which were populated from our leads table when the lead was pushed.
-    const leadRows = leads.map(l => ({
+    // Upsert status/step/last_event_at for each lead
+    const statusRows = leads.map(l => ({
       sequence_id:     seq.id,
       lemlist_lead_id: l._id,
       status:          mapStatus(l.state ?? l.status),
@@ -120,10 +118,34 @@ async function syncFromLemlist(req, res) {
 
     const { error: leadErr } = await supabase
       .from('sequence_leads')
-      .upsert(leadRows, { onConflict: 'sequence_id,lemlist_lead_id' });
+      .upsert(statusRows, { onConflict: 'sequence_id,lemlist_lead_id' });
     if (leadErr) { logError('syncFromLemlist upsert leads', leadErr); return res.status(500).json({ error: leadErr.message }); }
 
-    res.json({ synced_sequences: 1, synced_leads: leadRows.length });
+    // Back-fill lead_id / name / company / email by matching lemlist_lead_id
+    // against outreach_drafts.lemlist_id (set when the lead was pushed)
+    const lemlistIds = leads.map(l => l._id).filter(Boolean);
+    if (lemlistIds.length > 0) {
+      const { data: matchedDrafts } = await supabase
+        .from('outreach_drafts')
+        .select('lemlist_id, lead_id, leads(id, name, company, email)')
+        .in('lemlist_id', lemlistIds);
+
+      for (const d of matchedDrafts ?? []) {
+        if (!d.lemlist_id || !d.lead_id) continue;
+        await supabase.from('sequence_leads')
+          .update({
+            lead_id: d.lead_id,
+            name:    d.leads?.name    ?? '',
+            company: d.leads?.company ?? '',
+            email:   d.leads?.email   ?? '',
+          })
+          .eq('sequence_id', seq.id)
+          .eq('lemlist_lead_id', d.lemlist_id);
+      }
+      console.log(`[syncFromLemlist] back-filled ${(matchedDrafts ?? []).length} leads from outreach_drafts`);
+    }
+
+    res.json({ synced_sequences: 1, synced_leads: leads.length });
   } catch (err) {
     logError('syncFromLemlist (thrown)', err);
     res.status(500).json({ error: err.message });

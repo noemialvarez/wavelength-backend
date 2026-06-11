@@ -233,32 +233,11 @@ async function approveAndSend(req, res) {
     const lemlistResult = await lemlist.addLeadToSequence(draft.leads, draft, campaignId);
     console.log(`[approveAndSend] Lemlist result: ${JSON.stringify(lemlistResult)}`);
 
-    // Persist the lead into sequence_leads so the Campaign Monitor has name/email/company
-    if (!lemlistResult.skipped && lemlistResult._id && campaignId) {
-      const { data: seq } = await supabase
-        .from('sequences').select('id').eq('lemlist_id', campaignId).maybeSingle();
-
-      // Ensure the sequences row exists (it may not if the user hasn't synced yet)
-      let seqId = seq?.id;
-      if (!seqId) {
-        const { data: inserted } = await supabase
-          .from('sequences')
-          .upsert({ lemlist_id: campaignId, name: campaignId, synced_at: new Date().toISOString() }, { onConflict: 'lemlist_id' })
-          .select('id').single();
-        seqId = inserted?.id;
-      }
-
-      if (seqId) {
-        await supabase.from('sequence_leads').upsert({
-          sequence_id:     seqId,
-          lemlist_lead_id: lemlistResult._id,
-          lead_id:         draft.lead_id,
-          email:           draft.leads?.email ?? '',
-          name:            draft.leads?.name  ?? '',
-          company:         draft.leads?.company ?? '',
-          status:          'Active',
-        }, { onConflict: 'sequence_id,lemlist_lead_id' });
-      }
+    // Store the Lemlist lead ID on the draft so the Campaign Monitor sync can join back to our leads table
+    if (!lemlistResult.skipped && lemlistResult._id) {
+      await supabase.from('outreach_drafts')
+        .update({ lemlist_id: lemlistResult._id })
+        .eq('id', draft.id);
     }
 
     res.json({ success: true, pushed: !lemlistResult.skipped, lemlist: lemlistResult });
