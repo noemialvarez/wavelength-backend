@@ -89,9 +89,8 @@ async function deleteLead(req, res) {
 
 function founderPayload(result) {
   if (!result) return null;
-  const name = result.name
-    || [result.firstName, result.lastName].filter(Boolean).join(' ')
-    || null;
+  const nameParts = [result.firstName, result.lastName].filter(Boolean);
+  const name = result.name || (nameParts.length ? nameParts.join(' ') : null);
   const linkedin_url = result.profileUrl || result.linkedinUrl || result.url || null;
   const payload = {};
   if (name) payload.name = name;
@@ -134,9 +133,8 @@ async function enrichLead(req, res) {
     };
     if (!lead.email) {
       // Phantombuster may return name fields in different shapes depending on agent config
-      const resolvedName = enriched?.name
-        || (enriched?.firstName ? `${enriched.firstName} ${enriched.lastName || ''}`.trim() : null)
-        || lead.name;
+      const enrichedName = enriched?.firstName ? `${enriched.firstName} ${enriched.lastName || ''}`.trim() : null;
+      const resolvedName = enriched?.name || enrichedName || lead.name;
       const resolvedCompany = enriched?.company || lead.company;
       const apolloEmail = await apolloService.findEmail(resolvedName, resolvedCompany);
       if (apolloEmail) updatePayload.email = apolloEmail;
