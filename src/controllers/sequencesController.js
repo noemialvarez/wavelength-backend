@@ -103,13 +103,11 @@ async function syncFromLemlist(req, res) {
     if (fetchSeqErr) { logError('syncFromLemlist fetch seq row', fetchSeqErr); return res.status(500).json({ error: fetchSeqErr.message }); }
 
     // Fetch all leads for this campaign from Lemlist
-    const rawLeads = await lemlistService.getCampaignLeads(campaignId);
-    console.log(`[syncFromLemlist] fetched ${rawLeads.length} leads from Lemlist`);
-    if (rawLeads.length > 0) {
-      console.log(`[syncFromLemlist] sample lead fields: ${JSON.stringify(rawLeads[0])}`);
-    }
+    const leads = await lemlistService.getCampaignLeads(campaignId);
+    console.log(`[syncFromLemlist] fetched ${leads.length} leads from Lemlist`);
+    console.log('[syncFromLemlist] first lead raw:', JSON.stringify(leads[0]));
 
-    const leadRows = rawLeads.map(l => {
+    const leadRows = leads.map(l => {
       const firstName = l.firstName ?? l.first_name ?? '';
       const lastName  = l.lastName  ?? l.last_name  ?? '';
       const name      = [firstName, lastName].filter(Boolean).join(' ') || l.email || '';
