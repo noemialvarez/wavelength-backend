@@ -34,8 +34,43 @@ async function getAgentOutput(agentId) {
   return data;
 }
 
+function parseFounderOutput(outputStr) {
+  var lines = (outputStr || '').split('\n').filter(Boolean);
+  var results = [];
+  for (var i = 0; i < lines.length; i++) {
+    try {
+      var parsed = JSON.parse(lines[i]);
+      if (Array.isArray(parsed)) results.push.apply(results, parsed);
+      else results.push(parsed);
+    } catch (e) {}
+  }
+  var founderRe = /co[\s-]?founder|founder|ceo/i;
+  var founderMatch = results.find(function(r) {
+    var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : ''));
+    return founderRe.test(title);
+  });
+  var finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
+  console.log('[phantombuster] parsed result:', JSON.stringify(finalResult));
+  return finalResult;
+}
+
 async function launchFounderSearch(companyName) {
   const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+
+  // Use cached results from last run if less than 24 hours old
+  try {
+    const { data: cached } = await pb.get(`/agents/fetch-output?id=${agentId}`);
+    const endedAt = cached.endedAt ? new Date(cached.endedAt).getTime() : 0;
+    const ageMs = Date.now() - endedAt;
+    if (cached.output && ageMs < 24 * 60 * 60 * 1000) {
+      console.log('[phantombuster] using cached results, age:', Math.round(ageMs / 60000), 'min');
+      return parseFounderOutput(cached.output);
+    }
+    console.log('[phantombuster] cached results too old or missing, launching new run');
+  } catch (e) {
+    console.log('[phantombuster] could not fetch cached results:', e.message);
+  }
+
   const searchUrl =
     `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
 
@@ -45,26 +80,8 @@ async function launchFounderSearch(companyName) {
     numberOfResultsPerSearch: 10,
   });
 
-  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 60000);
-
-  const lines = (agentOutput.output || '').split('\n').filter(Boolean);
-  const results = [];
-  for (const line of lines) {
-    try {
-      const parsed = JSON.parse(line);
-      if (Array.isArray(parsed)) results.push(...parsed);
-      else results.push(parsed);
-    } catch {}
-  }
-
-  const founderRe = /co[\s-]?founder|founder|ceo/i;
-  const founderMatch = results.find(function(r) {
-    var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : ''));
-    return founderRe.test(title);
-  });
-  const finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
-  console.log('[phantombuster] parsed result:', JSON.stringify(finalResult));
-  return finalResult;
+  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
+  return parseFounderOutput(agentOutput.output);
 }
 
 async function enrichFounder(lead) {
