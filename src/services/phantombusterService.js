@@ -17,7 +17,7 @@ async function launchAgent(agentId, args = {}) {
   }
 }
 
-async function waitForAgent(agentId, containerId, pollMs = 3000, maxWaitMs = 60000) {
+async function waitForAgent(agentId, containerId, pollMs = 5000, maxWaitMs = 180000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const { data } = await pb.get(`/containers/fetch-output?id=${containerId}`);
