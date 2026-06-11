@@ -109,24 +109,27 @@ async function syncFromLemlist(req, res) {
 
     const leadRows = [];
     for (const l of leads) {
-      let contact = null;
-      if (l.contactId) {
+      const email = l.email ?? '';
+
+      let details = null;
+      if (email) {
         try {
-          contact = await lemlistService.getContact(l.contactId);
-          console.log(`[syncFromLemlist] contact ${l.contactId}:`, JSON.stringify(contact));
+          details = await lemlistService.getLead(email);
+          console.log(`[syncFromLemlist] lead details for ${email}:`, JSON.stringify(details));
         } catch (err) {
-          console.error(`[syncFromLemlist] failed to fetch contact ${l.contactId}:`, err.message);
+          console.error(`[syncFromLemlist] getLead(${email}) failed:`, err.message);
         }
       }
-      const firstName = contact?.firstName ?? '';
-      const lastName  = contact?.lastName  ?? '';
-      const name      = [firstName, lastName].filter(Boolean).join(' ') || contact?.email || '';
+
+      const firstName = details?.firstName ?? '';
+      const lastName  = details?.lastName  ?? '';
+      const name      = [firstName, lastName].filter(Boolean).join(' ') || email;
       leadRows.push({
         sequence_id:     seq.id,
         lemlist_lead_id: l._id,
-        email:           contact?.email ?? '',
+        email,
         name,
-        company:         contact?.companyName ?? '',
+        company:         details?.companyName ?? '',
         status:          mapStatus(l.state ?? l.status),
         step:            String(l.currentStep ?? l.step ?? ''),
         last_event_at:   l.lastEmailSentAt ?? l.updatedAt ?? null,

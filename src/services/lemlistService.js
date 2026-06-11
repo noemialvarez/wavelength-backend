@@ -34,9 +34,9 @@ async function getCampaignLeads(campaignId) {
   return data;
 }
 
-async function getContact(contactId) {
+async function getLead(email) {
   if (!isConfigured()) return null;
-  const { data } = await client().get(`/v2/contacts/${contactId}`);
+  const { data } = await client().get(`/leads/${encodeURIComponent(email)}`);
   return data;
 }
 
@@ -71,4 +71,4 @@ async function addLeadToSequence(lead, draft, campaignId) {
   return data;
 }
 
-module.exports = { listCampaigns, getCampaignLeads, getContact, addLeadToSequence };
+module.exports = { listCampaigns, getCampaignLeads, getLead, addLeadToSequence };
