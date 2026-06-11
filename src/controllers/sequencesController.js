@@ -2,6 +2,19 @@ const supabase = require('../config/supabase');
 const lemlistService = require('../services/lemlistService');
 const logError = require('../utils/logError');
 
+const STATUS_MAP = {
+  contacted:     'Active',
+  inProgress:    'Active',
+  interested:    'Replied',
+  notInterested: 'Unsubscribed',
+  unsubscribed:  'Unsubscribed',
+  bounced:       'Bounced',
+};
+
+function mapStatus(raw) {
+  return STATUS_MAP[raw] ?? 'Active';
+}
+
 async function listSequences(req, res) {
   try {
     const { data, error } = await supabase
@@ -66,51 +79,60 @@ async function listAllSequenceLeads(req, res) {
 
 async function syncFromLemlist(req, res) {
   try {
-    const lemlistCampaigns = await lemlistService.listCampaigns();
+    // Read the saved campaign ID — same source as the Lemlist push
+    const { data: settings } = await supabase
+      .from('positioning').select('lemlist_campaign_id').limit(1).maybeSingle();
 
-    const sequenceRows = lemlistCampaigns.map(c => ({
-      lemlist_id: c._id,
-      name: c.name,
-      status: c.status,
-      synced_at: new Date().toISOString(),
+    const campaignId = settings?.lemlist_campaign_id || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
+    if (!campaignId) {
+      return res.status(400).json({ error: 'No campaign ID configured — save one in Email Outreach Settings.' });
+    }
+    console.log(`[syncFromLemlist] campaign: ${campaignId}`);
+
+    // Upsert the campaign row (name comes from the campaigns list)
+    const allCampaigns = await lemlistService.listCampaigns();
+    const meta = allCampaigns.find(c => c._id === campaignId);
+    const { error: seqErr } = await supabase.from('sequences').upsert(
+      { lemlist_id: campaignId, name: meta?.name ?? campaignId, status: meta?.status ?? null, synced_at: new Date().toISOString() },
+      { onConflict: 'lemlist_id' }
+    );
+    if (seqErr) { logError('syncFromLemlist upsert sequence', seqErr); return res.status(500).json({ error: seqErr.message }); }
+
+    const { data: seq, error: fetchSeqErr } = await supabase
+      .from('sequences').select('id').eq('lemlist_id', campaignId).single();
+    if (fetchSeqErr) { logError('syncFromLemlist fetch seq row', fetchSeqErr); return res.status(500).json({ error: fetchSeqErr.message }); }
+
+    // Fetch all leads for this campaign from Lemlist
+    const rawLeads = await lemlistService.getCampaignLeads(campaignId);
+    console.log(`[syncFromLemlist] fetched ${rawLeads.length} leads from Lemlist`);
+
+    const leadRows = rawLeads.map(l => ({
+      sequence_id: seq.id,
+      lemlist_lead_id: l._id,
+      email: l.email,
+      status: mapStatus(l.status),
+      step: String(l.currentStep ?? l.step ?? ''),
+      last_event_at: l.lastEmailSentAt ?? l.updatedAt ?? null,
     }));
 
-    const { error: upsertError } = await supabase
-      .from('sequences')
-      .upsert(sequenceRows, { onConflict: 'lemlist_id' });
+    const { error: leadErr } = await supabase
+      .from('sequence_leads')
+      .upsert(leadRows, { onConflict: 'sequence_id,lemlist_lead_id' });
+    if (leadErr) { logError('syncFromLemlist upsert leads', leadErr); return res.status(500).json({ error: leadErr.message }); }
 
-    if (upsertError) { logError('syncFromLemlist upsert sequences', upsertError); return res.status(500).json({ error: upsertError.message }); }
-
-    let totalLeads = 0;
-    for (const campaign of lemlistCampaigns) {
-      const campaignLeads = await lemlistService.getCampaignLeads(campaign._id);
-      const { data: seq, error: seqError } = await supabase
-        .from('sequences')
-        .select('id')
-        .eq('lemlist_id', campaign._id)
-        .single();
-
-      if (seqError) { logError(`syncFromLemlist fetch seq ${campaign._id}`, seqError); continue; }
-      if (!seq) continue;
-
-      const leadRows = campaignLeads.map(l => ({
-        sequence_id: seq.id,
-        lemlist_lead_id: l._id,
-        email: l.email,
-        status: l.status,
-        step: l.currentStep,
-        last_event_at: l.lastEmailSentAt,
-      }));
-
-      const { error: leadUpsertError } = await supabase
-        .from('sequence_leads')
-        .upsert(leadRows, { onConflict: 'sequence_id,lemlist_lead_id' });
-
-      if (leadUpsertError) logError(`syncFromLemlist upsert leads for ${campaign._id}`, leadUpsertError);
-      else totalLeads += leadRows.length;
+    // Back-fill lead_id FK by matching email to our leads table
+    for (const row of leadRows) {
+      if (!row.email) continue;
+      const { data: lead } = await supabase.from('leads').select('id').eq('email', row.email).maybeSingle();
+      if (lead) {
+        await supabase.from('sequence_leads')
+          .update({ lead_id: lead.id })
+          .eq('sequence_id', seq.id)
+          .eq('lemlist_lead_id', row.lemlist_lead_id);
+      }
     }
 
-    res.json({ synced_sequences: sequenceRows.length, synced_leads: totalLeads });
+    res.json({ synced_sequences: 1, synced_leads: leadRows.length });
   } catch (err) {
     logError('syncFromLemlist (thrown)', err);
     res.status(500).json({ error: err.message });
