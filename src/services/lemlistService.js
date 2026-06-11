@@ -34,11 +34,6 @@ async function getCampaignLeads(campaignId) {
   return data;
 }
 
-async function getLead(email) {
-  if (!isConfigured()) return null;
-  const { data } = await client().get(`/leads/${encodeURIComponent(email)}`);
-  return data;
-}
 
 async function addLeadToSequence(lead, draft, campaignId) {
   campaignId = campaignId || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
@@ -71,4 +66,4 @@ async function addLeadToSequence(lead, draft, campaignId) {
   return data;
 }
 
-module.exports = { listCampaigns, getCampaignLeads, getLead, addLeadToSequence };
+module.exports = { listCampaigns, getCampaignLeads, addLeadToSequence };

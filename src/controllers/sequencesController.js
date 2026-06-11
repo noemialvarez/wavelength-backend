@@ -102,56 +102,26 @@ async function syncFromLemlist(req, res) {
       .from('sequences').select('id').eq('lemlist_id', campaignId).single();
     if (fetchSeqErr) { logError('syncFromLemlist fetch seq row', fetchSeqErr); return res.status(500).json({ error: fetchSeqErr.message }); }
 
-    // Fetch all leads for this campaign from Lemlist
+    // Fetch leads from Lemlist — only _id and state are available; name/email/company
+    // come from our local sequence_leads rows written at push time.
     const leads = await lemlistService.getCampaignLeads(campaignId);
     console.log(`[syncFromLemlist] fetched ${leads.length} leads from Lemlist`);
     console.log('[syncFromLemlist] first lead raw:', JSON.stringify(leads[0]));
 
-    const leadRows = [];
-    for (const l of leads) {
-      const email = l.email ?? '';
-
-      let details = null;
-      if (email) {
-        try {
-          details = await lemlistService.getLead(email);
-          console.log(`[syncFromLemlist] lead details for ${email}:`, JSON.stringify(details));
-        } catch (err) {
-          console.error(`[syncFromLemlist] getLead(${email}) failed:`, err.message);
-        }
-      }
-
-      const firstName = details?.firstName ?? '';
-      const lastName  = details?.lastName  ?? '';
-      const name      = [firstName, lastName].filter(Boolean).join(' ') || email;
-      leadRows.push({
-        sequence_id:     seq.id,
-        lemlist_lead_id: l._id,
-        email,
-        name,
-        company:         details?.companyName ?? '',
-        status:          mapStatus(l.state ?? l.status),
-        step:            String(l.currentStep ?? l.step ?? ''),
-        last_event_at:   l.lastEmailSentAt ?? l.updatedAt ?? null,
-      });
-    }
+    // Only update status/step/last_event_at — do not overwrite email/name/company
+    // which were populated from our leads table when the lead was pushed.
+    const leadRows = leads.map(l => ({
+      sequence_id:     seq.id,
+      lemlist_lead_id: l._id,
+      status:          mapStatus(l.state ?? l.status),
+      step:            String(l.currentStep ?? l.step ?? ''),
+      last_event_at:   l.lastEmailSentAt ?? l.updatedAt ?? null,
+    }));
 
     const { error: leadErr } = await supabase
       .from('sequence_leads')
       .upsert(leadRows, { onConflict: 'sequence_id,lemlist_lead_id' });
     if (leadErr) { logError('syncFromLemlist upsert leads', leadErr); return res.status(500).json({ error: leadErr.message }); }
-
-    // Back-fill lead_id FK by matching email to our leads table
-    for (const row of leadRows) {
-      if (!row.email) continue;
-      const { data: lead } = await supabase.from('leads').select('id').eq('email', row.email).maybeSingle();
-      if (lead) {
-        await supabase.from('sequence_leads')
-          .update({ lead_id: lead.id })
-          .eq('sequence_id', seq.id)
-          .eq('lemlist_lead_id', row.lemlist_lead_id);
-      }
-    }
 
     res.json({ synced_sequences: 1, synced_leads: leadRows.length });
   } catch (err) {
