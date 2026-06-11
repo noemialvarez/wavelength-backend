@@ -54,18 +54,18 @@ function pickFounder(results) {
   return finalResult;
 }
 
-async function fetchAgentResults(agentId) {
-  const { data } = await pb.get(`/agents/fetch-output?id=${agentId}`);
-  console.log('[phantombuster] fetch-output response:', JSON.stringify(data));
-  var profiles = [];
-  if (data.resultObject) {
-    try {
-      var parsed = typeof data.resultObject === 'string' ? JSON.parse(data.resultObject) : data.resultObject;
-      profiles = Array.isArray(parsed) ? parsed : (parsed.profiles ? parsed.profiles : [parsed]);
-    } catch (e) {
-      console.log('[phantombuster] could not parse resultObject:', e.message);
-    }
+async function fetchS3Results(outputText) {
+  console.log('[phantombuster] agent output text:', outputText);
+  var match = (outputText || '').match(/JSON saved at (https:\/\/\S+)/);
+  if (!match) {
+    console.log('[phantombuster] no S3 URL found in output text');
+    return [];
   }
+  var s3Url = match[1];
+  console.log('[phantombuster] fetching S3 URL:', s3Url);
+  var response = await axios.get(s3Url);
+  var profiles = Array.isArray(response.data) ? response.data : [];
+  console.log('[phantombuster] fetched profiles from S3:', JSON.stringify(profiles));
   return profiles;
 }
 
@@ -78,12 +78,12 @@ async function launchFounderSearch(companyName) {
     console.log('[phantombuster] cached fetch-output response:', JSON.stringify(cached));
     const endedAt = cached.endedAt ? new Date(cached.endedAt).getTime() : 0;
     const ageMs = Date.now() - endedAt;
-    if (cached.resultObject && ageMs < 24 * 60 * 60 * 1000) {
+    if (cached.output && ageMs < 24 * 60 * 60 * 1000) {
       console.log('[phantombuster] using cached results, age:', Math.round(ageMs / 60000), 'min');
-      const profiles = await fetchAgentResults(agentId);
-      return pickFounder(profiles);
+      const profiles = await fetchS3Results(cached.output);
+      if (profiles.length > 0) return pickFounder(profiles);
     }
-    console.log('[phantombuster] cached results too old or missing, launching new run');
+    console.log('[phantombuster] cached results too old, missing, or empty — launching new run');
   } catch (e) {
     console.log('[phantombuster] could not fetch cached results:', e.message);
   }
@@ -98,15 +98,7 @@ async function launchFounderSearch(companyName) {
   });
 
   const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
-  var profiles = [];
-  if (agentOutput.resultObject) {
-    try {
-      var parsed = typeof agentOutput.resultObject === 'string' ? JSON.parse(agentOutput.resultObject) : agentOutput.resultObject;
-      profiles = Array.isArray(parsed) ? parsed : (parsed.profiles ? parsed.profiles : [parsed]);
-    } catch (e) {
-      console.log('[phantombuster] could not parse resultObject:', e.message);
-    }
-  }
+  const profiles = await fetchS3Results(agentOutput.output);
   return pickFounder(profiles);
 }
 
