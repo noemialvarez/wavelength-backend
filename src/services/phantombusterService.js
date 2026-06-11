@@ -75,7 +75,7 @@ async function launchFounderSearch(companyName) {
     `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
 
   const launch = await launchAgent(agentId, {
-    searches: searchUrl,
+    search: searchUrl,
     sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
     numberOfResultsPerSearch: 10,
   });
