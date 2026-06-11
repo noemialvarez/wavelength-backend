@@ -81,23 +81,35 @@ async function getSettings(req, res) {
 
 async function upsertCampaignId(req, res) {
   try {
+    console.log('[upsertCampaignId] body:', JSON.stringify(req.body));
     const { lemlist_campaign_id } = req.body;
     if (lemlist_campaign_id === undefined) return res.status(400).json({ error: 'lemlist_campaign_id is required' });
 
-    const { data: existing } = await supabase.from('positioning').select('id').limit(1).maybeSingle();
+    const { data: existing, error: fetchErr } = await supabase.from('positioning').select('id').limit(1).maybeSingle();
+    if (fetchErr) {
+      logError('upsertCampaignId fetch existing', fetchErr);
+      return res.status(500).json({ error: fetchErr.message });
+    }
+    console.log('[upsertCampaignId] existing row:', existing);
 
     let result;
     if (existing) {
+      console.log('[upsertCampaignId] updating row', existing.id);
       result = await supabase.from('positioning')
         .update({ lemlist_campaign_id, updated_at: new Date().toISOString() })
         .eq('id', existing.id).select('lemlist_campaign_id').single();
     } else {
+      console.log('[upsertCampaignId] no existing row — inserting');
       result = await supabase.from('positioning')
         .insert({ lemlist_campaign_id, content: '', updated_at: new Date().toISOString() })
         .select('lemlist_campaign_id').single();
     }
 
-    if (result.error) { logError('upsertCampaignId', result.error); return res.status(500).json({ error: result.error.message }); }
+    if (result.error) {
+      logError('upsertCampaignId db write', result.error);
+      return res.status(500).json({ error: result.error.message });
+    }
+    console.log('[upsertCampaignId] success:', JSON.stringify(result.data));
     res.json(result.data);
   } catch (err) {
     logError('upsertCampaignId (thrown)', err);
