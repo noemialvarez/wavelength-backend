@@ -54,19 +54,24 @@ async function addLeadToSequence(lead, draft, campaignId) {
     throw new Error(`Lead "${lead.name || lead.id}" has no email address — cannot push to Lemlist`);
   }
 
-  const body = {
+  const payload = {
     firstName: lead.name?.split(' ')[0] || '',
     lastName: lead.name?.split(' ').slice(1).join(' ') || '',
     companyName: lead.company || '',
     icebreaker: extractIcebreaker(draft.body),
     linkedinUrl: lead.linkedin_url || '',
     subject: draft.subject || '',
-    body: draft.body || '',
+    emailBody: draft.body || '',
   };
 
-  console.log(`[Lemlist] Pushing ${email} to campaign ${campaignId}`);
-  const { data } = await client().post(`/campaigns/${campaignId}/leads/${encodeURIComponent(email)}`, body);
-  return data;
+  console.log(`[Lemlist] Pushing ${email} to campaign ${campaignId}`, JSON.stringify(payload));
+  try {
+    const { data } = await client().post(`/campaigns/${campaignId}/leads/${encodeURIComponent(email)}`, payload);
+    return data;
+  } catch (err) {
+    console.error('[Lemlist] 400 response body:', JSON.stringify(err?.response?.data));
+    throw err;
+  }
 }
 
 module.exports = { listCampaigns, getCampaignLeads, addLeadToSequence };
