@@ -36,6 +36,7 @@ async function getCampaignLeads(campaignId) {
 
 
 async function addLeadToSequence(lead, draft, campaignId) {
+  console.log('LEMLIST_API_KEY present:', !!process.env.LEMLIST_API_KEY);
   campaignId = campaignId || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
 
   if (!isConfigured()) {
@@ -59,6 +60,8 @@ async function addLeadToSequence(lead, draft, campaignId) {
     companyName: lead.company || '',
     icebreaker: extractIcebreaker(draft.body),
     linkedinUrl: lead.linkedin_url || '',
+    subject: draft.subject || '',
+    body: draft.body || '',
   };
 
   console.log(`[Lemlist] Pushing ${email} to campaign ${campaignId}`);
