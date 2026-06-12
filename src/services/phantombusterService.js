@@ -5,15 +5,48 @@ const pb = axios.create({
   headers: { 'X-Phantombuster-Key': process.env.PHANTOMBUSTER_API_KEY },
 });
 
+// Per-company result cache: companyName -> { result, ts }
+const resultCache = new Map();
+// Per-agent in-flight promise: agentId -> Promise
+const agentInFlight = new Map();
+// Per-agent last-launch timestamp: agentId -> ms
+const agentLastLaunch = new Map();
+
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MIN_LAUNCH_INTERVAL_MS = 30 * 1000;
+const PARALLELISM_RETRY_WAIT_MS = 15 * 1000;
+
 async function launchAgent(agentId, args = {}) {
   const body = { id: agentId, argument: JSON.stringify(args) };
   console.log('[phantombuster] request body:', JSON.stringify(body));
+
+  const attempt = async () => {
+    try {
+      const { data } = await pb.post('/agents/launch', body);
+      return data;
+    } catch (error) {
+      console.log('[phantombuster] error response:', error.response ? error.response.data : null);
+      const status = error.response?.status;
+      const msg = JSON.stringify(error.response?.data || '');
+      if (status === 429 || msg.includes('maxParallelismReached')) {
+        const retryErr = new Error('retryable');
+        retryErr.retryable = true;
+        retryErr.cause = error;
+        throw retryErr;
+      }
+      throw error;
+    }
+  };
+
   try {
-    const { data } = await pb.post('/agents/launch', body);
-    return data;
-  } catch (error) {
-    console.log('[phantombuster] error response:', error.response ? error.response.data : null);
-    throw error;
+    return await attempt();
+  } catch (e) {
+    if (e.retryable) {
+      console.log('[phantombuster] agent busy (429/maxParallelismReached), waiting 15s then retrying once');
+      await new Promise(r => setTimeout(r, PARALLELISM_RETRY_WAIT_MS));
+      return attempt().catch(e2 => { throw e2.cause || e2; });
+    }
+    throw e;
   }
 }
 
@@ -71,36 +104,57 @@ async function fetchS3Results(outputText) {
 }
 
 async function launchFounderSearch(companyName) {
-  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
-
-  // Use cached results from last run if less than 24 hours old
-  try {
-    const { data: cached } = await pb.get(`/agents/fetch-output?id=${agentId}`);
-    console.log('[phantombuster] cached fetch-output response:', JSON.stringify(cached));
-    const endedAt = cached.endedAt ? new Date(cached.endedAt).getTime() : 0;
-    const ageMs = Date.now() - endedAt;
-    if (cached.output && ageMs < 24 * 60 * 60 * 1000) {
-      console.log('[phantombuster] using cached results, age:', Math.round(ageMs / 60000), 'min');
-      const profiles = await fetchS3Results(cached.output);
-      if (profiles.length > 0) return pickFounder(profiles);
-    }
-    console.log('[phantombuster] cached results too old, missing, or empty — launching new run');
-  } catch (e) {
-    console.log('[phantombuster] could not fetch cached results:', e.message);
+  // 1. Return per-company cached result if still fresh
+  const cached = resultCache.get(companyName);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    console.log('[phantombuster] cache hit for', companyName, '— returning cached result');
+    return cached.result;
   }
 
-  const searchUrl =
-    `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
 
-  const launch = await launchAgent(agentId, {
-    search: searchUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
-    numberOfResultsPerSearch: 10,
+  // 2. If the agent is already running, wait for it then re-check cache
+  if (agentInFlight.has(agentId)) {
+    console.log('[phantombuster] agent already running, waiting for in-flight run to finish');
+    await agentInFlight.get(agentId).catch(() => {});
+    const fresh = resultCache.get(companyName);
+    if (fresh && Date.now() - fresh.ts < CACHE_TTL_MS) return fresh.result;
+  }
+
+  // 3. Enforce 30s minimum gap between launches
+  const lastLaunch = agentLastLaunch.get(agentId) || 0;
+  const msSinceLast = Date.now() - lastLaunch;
+  if (msSinceLast < MIN_LAUNCH_INTERVAL_MS) {
+    const waitMs = MIN_LAUNCH_INTERVAL_MS - msSinceLast;
+    console.log(`[phantombuster] rate limit cooldown: waiting ${Math.ceil(waitMs / 1000)}s before next launch`);
+    await new Promise(r => setTimeout(r, waitMs));
+  }
+
+  // 4. Launch and register the in-flight promise so concurrent callers queue behind it
+  const runPromise = (async () => {
+    agentLastLaunch.set(agentId, Date.now());
+
+    const searchUrl =
+      `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+
+    const launch = await launchAgent(agentId, {
+      search: searchUrl,
+      sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+      numberOfResultsPerSearch: 10,
+    });
+
+    const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
+    const profiles = await fetchS3Results(agentOutput.output);
+    const result = pickFounder(profiles);
+
+    resultCache.set(companyName, { result, ts: Date.now() });
+    return result;
+  })().finally(() => {
+    agentInFlight.delete(agentId);
   });
 
-  const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
-  const profiles = await fetchS3Results(agentOutput.output);
-  return pickFounder(profiles);
+  agentInFlight.set(agentId, runPromise);
+  return runPromise;
 }
 
 async function enrichFounder(lead) {
@@ -137,7 +191,6 @@ async function fetchLinkedInActivity(profileUrls) {
 }
 
 async function postLinkedInComment(postUrl, commentText) {
-  // Requires a dedicated Phantombuster agent for posting comments
   const agentId = process.env.PHANTOMBUSTER_COMMENT_AGENT_ID;
   const launch = await launchAgent(agentId, {
     postUrl,
