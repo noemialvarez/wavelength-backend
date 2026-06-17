@@ -82,12 +82,14 @@ async function findCompaniesByDescription({ description, industry, geography, au
         role: 'user',
         content: `You are a B2B sales researcher. Generate a list of 10 real companies that match the following criteria.
 
-CRITERIA:
+Return ONLY companies that strictly match ALL of these criteria:
 - Description: ${description}
 - Industry: ${industry || 'any'}
 - Geography: ${geography || 'any'}
 - Audience: ${audience || 'any'}
-- Company size: ${companySize || 'any'}
+- Company size (employees): ${companySize || 'any'}
+
+Do not return companies outside these criteria under any circumstances.
 
 Return ONLY a valid JSON array — no markdown, no explanation:
 [
@@ -103,7 +105,7 @@ Return ONLY a valid JSON array — no markdown, no explanation:
 
 Rules:
 - Only real, verifiable companies
-- "why_match" must explain specifically why this company fits the description
+- "why_match" must explain specifically why this company fits ALL of the criteria above
 - "website" must be the real homepage domain (e.g. "https://example.com")
 - Return exactly 10 entries`,
       },
