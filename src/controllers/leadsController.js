@@ -45,9 +45,14 @@ async function getLead(req, res) {
 
 async function createLead(req, res) {
   try {
+    const { signalSummary, ...rest } = req.body;
+    const payload = { ...rest };
+    // signalSummary is a frontend-only camelCase field; map it to the notes column
+    if (signalSummary && !payload.notes) payload.notes = signalSummary;
+
     const { data, error } = await supabase
       .from('leads')
-      .insert({ ...req.body })
+      .insert(payload)
       .select()
       .single();
 
