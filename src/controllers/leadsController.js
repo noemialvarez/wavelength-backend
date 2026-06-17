@@ -43,12 +43,24 @@ async function getLead(req, res) {
   }
 }
 
+// Valid writable columns in the leads table
+const LEAD_COLUMNS = new Set(['name', 'email', 'company', 'role', 'linkedin_url', 'source', 'signal_id', 'status', 'notes', 'enrichment_data', 'enriched_at', 'created_by']);
+
+function sanitizeLeadPayload(body) {
+  // Map known camelCase / frontend-only fields to their DB equivalents
+  const mapped = { ...body };
+  if (mapped.signalSummary !== undefined) { if (!mapped.notes) mapped.notes = mapped.signalSummary; delete mapped.signalSummary; }
+  if (mapped.founderName   !== undefined) { if (!mapped.name)  mapped.name  = mapped.founderName;  delete mapped.founderName;   }
+  if (mapped.linkedinUrl   !== undefined) { if (!mapped.linkedin_url) mapped.linkedin_url = mapped.linkedinUrl; delete mapped.linkedinUrl; }
+  // signalType has no DB column — drop it
+  delete mapped.signalType;
+  // Keep only valid columns
+  return Object.fromEntries(Object.entries(mapped).filter(([k]) => LEAD_COLUMNS.has(k)));
+}
+
 async function createLead(req, res) {
   try {
-    const { signalSummary, ...rest } = req.body;
-    const payload = { ...rest };
-    // signalSummary is a frontend-only camelCase field; map it to the notes column
-    if (signalSummary && !payload.notes) payload.notes = signalSummary;
+    const payload = sanitizeLeadPayload(req.body);
 
     const { data, error } = await supabase
       .from('leads')
