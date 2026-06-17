@@ -10,7 +10,7 @@ function isConfigured() {
  * Returns the email string on success, null if not found or key not configured.
  * Never throws — failures are logged and swallowed so the caller flow continues.
  */
-async function findEmail(name, company) {
+async function findEmail(name, company, linkedin_url) {
   if (!isConfigured()) {
     console.log('[Apollo] API key not configured — skipping email lookup');
     return null;
@@ -28,6 +28,7 @@ async function findEmail(name, company) {
     organization_name: company,
     reveal_personal_emails: false,
   };
+  if (linkedin_url) payload.linkedin_url = linkedin_url;
   const headers = {
     'Content-Type': 'application/json',
     'Cache-Control': 'no-cache',

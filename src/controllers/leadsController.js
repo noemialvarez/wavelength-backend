@@ -52,6 +52,23 @@ async function createLead(req, res) {
       .single();
 
     if (error) { logError('createLead', error); return res.status(400).json({ error: error.message }); }
+
+    if (!data.email && apolloService.isConfigured()) {
+      const email = await apolloService.findEmail(data.name, data.company, data.linkedin_url);
+      if (email) {
+        console.log(`Apollo enrichment: found email ${email} for lead ${data.name}`);
+        const { data: updated } = await supabase
+          .from('leads')
+          .update({ email, enrichment_data: { ...(data.enrichment_data || {}), email_source: 'apollo' } })
+          .eq('id', data.id)
+          .select()
+          .single();
+        if (updated) return res.status(201).json(updated);
+      } else {
+        console.log(`Apollo enrichment: no email found for lead ${data.name}`);
+      }
+    }
+
     res.status(201).json(data);
   } catch (err) {
     logError('createLead (thrown)', err);
@@ -189,7 +206,31 @@ async function importLeads(req, res) {
     const rows = leads.map(l => ({ ...l, status: 'new' }));
     const { data, error } = await supabase.from('leads').insert(rows).select();
     if (error) { logError('importLeads', error); return res.status(400).json({ error: error.message }); }
+
+    // Respond immediately, enrich missing emails in the background
     res.status(201).json({ imported: data.length, data });
+
+    if (apolloService.isConfigured()) {
+      const toEnrich = data.filter(l => !l.email);
+      setImmediate(async () => {
+        for (const lead of toEnrich) {
+          try {
+            const email = await apolloService.findEmail(lead.name, lead.company, lead.linkedin_url);
+            if (email) {
+              console.log(`Apollo enrichment: found email ${email} for lead ${lead.name}`);
+              await supabase.from('leads').update({
+                email,
+                enrichment_data: { ...(lead.enrichment_data || {}), email_source: 'apollo' },
+              }).eq('id', lead.id);
+            } else {
+              console.log(`Apollo enrichment: no email found for lead ${lead.name}`);
+            }
+          } catch (err) {
+            logError(`importLeads apollo enrichment for ${lead.name}`, err);
+          }
+        }
+      });
+    }
   } catch (err) {
     logError('importLeads (thrown)', err);
     res.status(500).json({ error: err.message });
