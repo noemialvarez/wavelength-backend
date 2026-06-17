@@ -49,15 +49,26 @@ const LEAD_COLUMNS = new Set(['name', 'email', 'company', 'role', 'linkedin_url'
 function sanitizeLeadPayload(body) {
   const mapped = { ...body };
 
-  // company_name (from Claude by-description results) → name + company
-  if (mapped.company_name !== undefined) {
-    if (!mapped.name)    mapped.name    = mapped.company_name;
-    if (!mapped.company) mapped.company = mapped.company_name;
-    delete mapped.company_name;
+  // Resolve name from every possible field the frontend might send
+  if (!mapped.name) {
+    mapped.name =
+      mapped.company_name ||
+      mapped.companyName  ||
+      mapped.Company      ||
+      mapped.Name         ||
+      mapped.title        ||
+      mapped.company      ||
+      null;
   }
-
-  // if name still missing, fall back to company
-  if (!mapped.name && mapped.company) mapped.name = mapped.company;
+  // Keep company in sync if still missing
+  if (!mapped.company) {
+    mapped.company =
+      mapped.company_name ||
+      mapped.companyName  ||
+      mapped.Company      ||
+      mapped.name         ||
+      null;
+  }
 
   // camelCase aliases
   if (mapped.signalSummary !== undefined) { if (!mapped.notes)        mapped.notes        = mapped.signalSummary; delete mapped.signalSummary; }
@@ -65,6 +76,11 @@ function sanitizeLeadPayload(body) {
   if (mapped.linkedinUrl   !== undefined) { if (!mapped.linkedin_url) mapped.linkedin_url = mapped.linkedinUrl;   delete mapped.linkedinUrl;   }
 
   // fields with no DB column — drop silently
+  delete mapped.company_name;
+  delete mapped.companyName;
+  delete mapped.Company;
+  delete mapped.Name;
+  delete mapped.title;
   delete mapped.signalType;
   delete mapped.first_name;
   delete mapped.last_name;
@@ -79,20 +95,12 @@ function sanitizeLeadPayload(body) {
 
 async function createLead(req, res) {
   try {
-    console.log('[createLead] raw body keys:', Object.keys(req.body), '| raw body:', JSON.stringify(req.body));
+    console.log('[createLead] FULL body:', JSON.stringify(req.body, null, 2));
 
     const payload = sanitizeLeadPayload(req.body);
 
-    // Safety net: name is NOT NULL — fall back through every possible source
-    if (!payload.name) {
-      payload.name =
-        req.body.companyName ||
-        req.body.company_name ||
-        req.body.company ||
-        req.body.founderName ||
-        req.body.name ||
-        'Unknown';
-    }
+    // Final safety net — name must never be null
+    if (!payload.name) payload.name = 'Unknown Company';
 
     const { data, error } = await supabase
       .from('leads')
