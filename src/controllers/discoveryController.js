@@ -178,14 +178,47 @@ async function dismissSignal(req, res) {
   }
 }
 
+function parseSizeRange(str) {
+  if (!str || str === 'any') return null;
+  const m = str.match(/^(\d+)[^\d]+(\d+)$/);
+  if (m) return { min: Number(m[1]), max: Number(m[2]) };
+  const single = str.match(/^(\d+)\+?$/);
+  if (single) return { min: Number(single[1]), max: Infinity };
+  return null;
+}
+
 async function findByDescription(req, res) {
   console.log('by-description route hit:', req.body);
   try {
     const { description, industry, geography, audience, companySize } = req.body;
     if (!description) return res.status(400).json({ error: 'description is required' });
 
+    // Claude returns up to 20 candidates; size filtering is handled post-Claude
     const companies = await claudeService.findCompaniesByDescription({ description, industry, geography, audience, companySize });
-    res.json(companies);
+
+    const sizeRange = parseSizeRange(companySize);
+    if (!sizeRange || !apolloService.isConfigured()) {
+      return res.json(companies.slice(0, 10));
+    }
+
+    // Apollo-verify employee counts in parallel, then filter to requested range
+    console.log(`[findByDescription] Apollo-verifying ${companies.length} companies for size ${companySize}`);
+    const enriched = await Promise.all(
+      companies.map(async (c) => {
+        const count = await apolloService.getCompanyEmployeeCount(c.website);
+        return { ...c, _employee_count: count };
+      })
+    );
+
+    const verified = enriched.filter(c => {
+      if (c._employee_count === null) return true; // Apollo had no data — keep it
+      return c._employee_count >= sizeRange.min && c._employee_count <= sizeRange.max;
+    });
+
+    console.log(`[findByDescription] ${verified.length} companies passed size filter (${companySize})`);
+
+    const result = verified.slice(0, 10).map(({ _employee_count, ...rest }) => rest);
+    res.json(result);
   } catch (err) {
     logError('findByDescription (thrown)', err);
     res.status(500).json({ error: err.message });

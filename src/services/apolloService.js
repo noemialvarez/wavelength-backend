@@ -67,4 +67,32 @@ async function findEmail(name, company, linkedin_url) {
   }
 }
 
-module.exports = { isConfigured, findEmail };
+/**
+ * Look up a company's employee count via Apollo Organization Enrich.
+ * Returns the estimated_num_employees integer, or null if not found.
+ * Never throws.
+ */
+async function getCompanyEmployeeCount(domain) {
+  if (!isConfigured() || !domain) return null;
+  // Strip protocol/path to get bare domain
+  const bare = domain.replace(/^https?:\/\//i, '').split('/')[0].trim();
+  if (!bare) return null;
+  try {
+    const { data } = await axios.get(
+      'https://api.apollo.io/api/v1/organizations/enrich',
+      {
+        params: { domain: bare },
+        headers: { 'X-Api-Key': process.env.APOLLO_API_KEY, 'Cache-Control': 'no-cache' },
+        timeout: 8000,
+      }
+    );
+    const count = data?.organization?.estimated_num_employees ?? null;
+    console.log(`[Apollo] ${bare} employee count: ${count}`);
+    return count;
+  } catch (err) {
+    console.error(`[Apollo] getCompanyEmployeeCount failed for ${bare}:`, err?.response?.status ?? err.message);
+    return null;
+  }
+}
+
+module.exports = { isConfigured, findEmail, getCompanyEmployeeCount };

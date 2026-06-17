@@ -81,21 +81,12 @@ async function findCompaniesByDescription({ description, industry, geography, au
     messages: [
       {
         role: 'user',
-        content: `Generate a list of 10 real companies that match ALL of these criteria:
+        content: `Generate a list of 20 real companies that match these criteria:
 - Description: ${description}
 - Industry: ${industry || 'any'}
 - Geography: ${geography || 'any'}
 - Audience: ${audience || 'any'}
-- Company size (employees): ${companySize || 'any'}
-
-CRITICAL: Company size filter is STRICT. You must ONLY return companies with exactly ${companySize || 'any'} employees.
-- If the filter is 1-10, return only micro-companies or solo founders with under 10 employees.
-- If the filter is 11-50, do NOT return any company with more than 50 employees.
-- If the filter is 51-200, do NOT return any company with more than 200 employees.
-- If the filter is 201-500, do NOT return any company with more than 500 employees.
-- Novartis, Roche, UBS, Swisscom, Nestlé, ABB, Zalando, SAP, Siemens and any other large enterprise are all too large for any filter under 1000 employees. Never return them unless the filter is explicitly above 5000 employees.
-- Focus on startups, scaleups, and SMEs that match the exact employee count range.
-- If you cannot find 10 companies that strictly match the size filter, return fewer — do not pad the list with oversized companies.
+${companySize ? `- Target company size: ${companySize} employees. Only include companies you are highly confident have ${companySize} employees. If you are not certain of a company's size, exclude it. It is better to return 3 correct results than 10 wrong ones.` : ''}
 
 Do not add any text before or after the JSON array.
 
