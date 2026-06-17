@@ -87,6 +87,7 @@ async function findCompaniesByDescription({ description, industry, geography, au
 - Geography: ${geography || 'any'}
 - Audience: ${audience || 'any'}
 ${companySize ? `- Target company size: ${companySize} employees. Only include companies you are highly confident have ${companySize} employees. If you are not certain of a company's size, exclude it. It is better to return 3 correct results than 10 wrong ones.` : ''}
+${audience === 'B2B' ? `- Audience is B2B: do NOT return consumer brands. Victorinox, Swatch, Nestlé, Lindt, Caran d'Ache, Nespresso, Logitech and any other B2C lifestyle or consumer product brand must be excluded when B2B is selected. Only return companies whose primary customers are other businesses.` : ''}
 
 Do not add any text before or after the JSON array.
 

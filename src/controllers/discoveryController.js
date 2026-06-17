@@ -190,34 +190,41 @@ function parseSizeRange(str) {
 async function findByDescription(req, res) {
   console.log('by-description route hit:', req.body);
   try {
-    const { description, industry, geography, audience, companySize } = req.body;
+    const { description, geography, audience } = req.body;
     if (!description) return res.status(400).json({ error: 'description is required' });
 
-    // Claude returns up to 20 candidates; size filtering is handled post-Claude
+    // Normalise array fields the frontend sends (industries/companySizes) to strings
+    const industry = req.body.industry ||
+      (Array.isArray(req.body.industries) ? req.body.industries.join(', ') : req.body.industries) || '';
+    const companySize = req.body.companySize ||
+      (Array.isArray(req.body.companySizes) ? req.body.companySizes[0] : req.body.companySizes) || '';
+
+    console.log(`[findByDescription] resolved industry="${industry}" companySize="${companySize}"`);
+
+    // Claude returns up to 20 candidates; size filtering is handled post-Claude via Apollo
     const companies = await claudeService.findCompaniesByDescription({ description, industry, geography, audience, companySize });
 
     const sizeRange = parseSizeRange(companySize);
     if (!sizeRange || !apolloService.isConfigured()) {
+      console.log(`[findByDescription] skipping Apollo size filter — sizeRange=${JSON.stringify(sizeRange)} apolloConfigured=${apolloService.isConfigured()}`);
       return res.json(companies.slice(0, 10));
     }
 
     // Apollo-verify employee counts in parallel, then filter to requested range
-    console.log(`[findByDescription] Apollo-verifying ${companies.length} companies for size ${companySize}`);
+    console.log(`[findByDescription] Apollo-verifying ${companies.length} companies for size ${companySize} (${sizeRange.min}-${sizeRange.max})`);
     const enriched = await Promise.all(
       companies.map(async (c) => {
         const count = await apolloService.getCompanyEmployeeCount(c.website);
-        return { ...c, _employee_count: count };
+        const pass = count === null || (count >= sizeRange.min && count <= sizeRange.max);
+        console.log(`[size-filter] company: ${c.company_name} employees: ${count} range: ${sizeRange.min}-${sizeRange.max} pass: ${pass}`);
+        return { ...c, _employee_count: count, _pass: pass };
       })
     );
 
-    const verified = enriched.filter(c => {
-      if (c._employee_count === null) return true; // Apollo had no data — keep it
-      return c._employee_count >= sizeRange.min && c._employee_count <= sizeRange.max;
-    });
+    const verified = enriched.filter(c => c._pass);
+    console.log(`[size-filter] kept: ${verified.length} of ${enriched.length} companies after Apollo size check`);
 
-    console.log(`[findByDescription] ${verified.length} companies passed size filter (${companySize})`);
-
-    const result = verified.slice(0, 10).map(({ _employee_count, ...rest }) => rest);
+    const result = verified.slice(0, 10).map(({ _employee_count, _pass, ...rest }) => rest);
     res.json(result);
   } catch (err) {
     logError('findByDescription (thrown)', err);
