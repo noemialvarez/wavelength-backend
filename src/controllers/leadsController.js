@@ -76,7 +76,20 @@ function sanitizeLeadPayload(body) {
 
 async function createLead(req, res) {
   try {
+    console.log('[createLead] raw body keys:', Object.keys(req.body), '| raw body:', JSON.stringify(req.body));
+
     const payload = sanitizeLeadPayload(req.body);
+
+    // Safety net: name is NOT NULL — fall back through every possible source
+    if (!payload.name) {
+      payload.name =
+        req.body.companyName ||
+        req.body.company_name ||
+        req.body.company ||
+        req.body.founderName ||
+        req.body.name ||
+        'Unknown';
+    }
 
     const { data, error } = await supabase
       .from('leads')
