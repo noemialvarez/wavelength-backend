@@ -76,43 +76,40 @@ Return only the comment text, nothing else.`,
 async function findCompaniesByDescription({ description, industry, geography, audience, companySize }) {
   const message = await client.messages.create({
     model: 'claude-opus-4-8',
-    max_tokens: 2048,
+    max_tokens: 4096,
+    system: 'You are a B2B sales researcher. You respond with raw JSON only — no preamble, no disclaimer, no explanation, no markdown. Your entire response must be a valid JSON array starting with [ and ending with ].',
     messages: [
       {
         role: 'user',
-        content: `You are a B2B sales researcher. Generate a list of 10 real companies that match the following criteria.
-
-Return ONLY companies that strictly match ALL of these criteria:
+        content: `Generate a list of 10 real companies that match ALL of these criteria:
 - Description: ${description}
 - Industry: ${industry || 'any'}
 - Geography: ${geography || 'any'}
 - Audience: ${audience || 'any'}
 - Company size (employees): ${companySize || 'any'}
 
-Do not return companies outside these criteria under any circumstances.
+Do not return companies outside these criteria.
+Do not add any text before or after the JSON array.
 
-Return ONLY a valid JSON array — no markdown, no explanation:
 [
   {
-    "company_name": "...",
-    "website": "...",
-    "industry": "...",
-    "geography": "...",
-    "description": "...",
-    "why_match": "..."
+    "company_name": "string",
+    "website": "string",
+    "industry": "string",
+    "geography": "string",
+    "description": "string",
+    "why_match": "string"
   }
-]
-
-Rules:
-- Only real, verifiable companies
-- "why_match" must explain specifically why this company fits ALL of the criteria above
-- "website" must be the real homepage domain (e.g. "https://example.com")
-- Return exactly 10 entries`,
+]`,
+      },
+      {
+        role: 'assistant',
+        content: '[',
       },
     ],
   });
 
-  const raw = message.content[0].text.trim();
+  const raw = '[' + message.content[0].text.trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const match = cleaned.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Claude did not return a valid JSON array. Got: ${raw.slice(0, 300)}`);
