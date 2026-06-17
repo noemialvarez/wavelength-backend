@@ -53,6 +53,7 @@ async function createLead(req, res) {
 
     if (error) { logError('createLead', error); return res.status(400).json({ error: error.message }); }
 
+    console.log('Apollo check - email:', data.email, 'API key set:', !!process.env.APOLLO_API_KEY);
     if (!data.email && apolloService.isConfigured()) {
       const email = await apolloService.findEmail(data.name, data.company, data.linkedin_url);
       if (email) {

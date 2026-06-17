@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase');
 const discoveryService = require('../services/discoveryService');
 const phantombusterService = require('../services/phantombusterService');
+const apolloService = require('../services/apolloService');
 const logError = require('../utils/logError');
 
 async function listRuns(req, res) {
@@ -112,24 +113,47 @@ async function promoteSignalToLead(req, res) {
 
     if (signalUpdateError) logError('promoteSignalToLead signal update', signalUpdateError);
 
-    // Auto-enrich: search LinkedIn for the founder in the background
-    if (signal.company_name && process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID) {
-      phantombusterService.launchFounderSearch(signal.company_name)
-        .then(result => {
-          if (!result) return;
-          const name = result.name || [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
-          const linkedin_url = result.profileUrl || result.linkedinUrl || result.url || null;
-          const patch = {};
-          if (name && !signal.founder_name) patch.name = name;
-          if (linkedin_url) patch.linkedin_url = linkedin_url;
-          if (Object.keys(patch).length) {
-            supabase.from('leads').update(patch).eq('id', lead.id)
-              .then(() => console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data`))
-              .catch(e => logError('promoteSignalToLead auto-enrich update', e));
+    // Auto-enrich in background: Phantombuster first (for linkedin_url), then Apollo for email
+    setImmediate(async () => {
+      try {
+        let resolvedName = lead.name;
+        let resolvedLinkedin = lead.linkedin_url;
+
+        // Step 1: Phantombuster — get linkedin_url before calling Apollo
+        if (signal.company_name && process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID) {
+          const result = await phantombusterService.launchFounderSearch(signal.company_name);
+          if (result) {
+            const pbName = result.name || [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
+            const pbLinkedin = result.profileUrl || result.linkedinUrl || result.url || null;
+            const patch = {};
+            if (pbName && !signal.founder_name) { patch.name = pbName; resolvedName = pbName; }
+            if (pbLinkedin) { patch.linkedin_url = pbLinkedin; resolvedLinkedin = pbLinkedin; }
+            if (Object.keys(patch).length) {
+              await supabase.from('leads').update(patch).eq('id', lead.id);
+              console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data`);
+            }
           }
-        })
-        .catch(e => logError('promoteSignalToLead launchFounderSearch', e));
-    }
+        }
+
+        // Step 2: Apollo email enrichment — re-fetch to check current email state
+        const { data: freshLead } = await supabase.from('leads').select('email').eq('id', lead.id).single();
+        console.log('Apollo check - email:', freshLead?.email, 'API key set:', !!process.env.APOLLO_API_KEY);
+        if (!freshLead?.email && apolloService.isConfigured()) {
+          const apolloEmail = await apolloService.findEmail(resolvedName, signal.company_name, resolvedLinkedin);
+          if (apolloEmail) {
+            console.log(`Apollo enrichment: found email ${apolloEmail} for lead ${resolvedName}`);
+            await supabase.from('leads').update({
+              email: apolloEmail,
+              enrichment_data: { email_source: 'apollo' },
+            }).eq('id', lead.id);
+          } else {
+            console.log(`Apollo enrichment: no email found for lead ${resolvedName}`);
+          }
+        }
+      } catch (e) {
+        logError('promoteSignalToLead background enrichment', e);
+      }
+    });
 
     res.status(201).json(lead);
   } catch (err) {
