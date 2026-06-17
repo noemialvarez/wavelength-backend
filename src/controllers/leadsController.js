@@ -47,13 +47,29 @@ async function getLead(req, res) {
 const LEAD_COLUMNS = new Set(['name', 'email', 'company', 'role', 'linkedin_url', 'source', 'signal_id', 'status', 'notes', 'enrichment_data', 'enriched_at', 'created_by']);
 
 function sanitizeLeadPayload(body) {
-  // Map known camelCase / frontend-only fields to their DB equivalents
   const mapped = { ...body };
-  if (mapped.signalSummary !== undefined) { if (!mapped.notes) mapped.notes = mapped.signalSummary; delete mapped.signalSummary; }
-  if (mapped.founderName   !== undefined) { if (!mapped.name)  mapped.name  = mapped.founderName;  delete mapped.founderName;   }
-  if (mapped.linkedinUrl   !== undefined) { if (!mapped.linkedin_url) mapped.linkedin_url = mapped.linkedinUrl; delete mapped.linkedinUrl; }
-  // signalType has no DB column — drop it
+
+  // company_name (from Claude by-description results) → name + company
+  if (mapped.company_name !== undefined) {
+    if (!mapped.name)    mapped.name    = mapped.company_name;
+    if (!mapped.company) mapped.company = mapped.company_name;
+    delete mapped.company_name;
+  }
+
+  // camelCase aliases
+  if (mapped.signalSummary !== undefined) { if (!mapped.notes)        mapped.notes        = mapped.signalSummary; delete mapped.signalSummary; }
+  if (mapped.founderName   !== undefined) { if (!mapped.name)         mapped.name         = mapped.founderName;   delete mapped.founderName;   }
+  if (mapped.linkedinUrl   !== undefined) { if (!mapped.linkedin_url) mapped.linkedin_url = mapped.linkedinUrl;   delete mapped.linkedinUrl;   }
+
+  // fields with no DB column — drop silently
   delete mapped.signalType;
+  delete mapped.first_name;
+  delete mapped.last_name;
+  delete mapped.why_match;
+  delete mapped.website;
+  delete mapped.industry;
+  delete mapped.geography;
+
   // Keep only valid columns
   return Object.fromEntries(Object.entries(mapped).filter(([k]) => LEAD_COLUMNS.has(k)));
 }
