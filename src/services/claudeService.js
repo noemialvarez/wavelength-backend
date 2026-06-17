@@ -91,6 +91,7 @@ async function findCompaniesByDescription({ description, industry, geography, au
 Do not return companies outside these criteria.
 Do not add any text before or after the JSON array.
 
+Return this exact structure:
 [
   {
     "company_name": "string",
@@ -102,14 +103,10 @@ Do not add any text before or after the JSON array.
   }
 ]`,
       },
-      {
-        role: 'assistant',
-        content: '[',
-      },
     ],
   });
 
-  const raw = '[' + message.content[0].text.trim();
+  const raw = message.content[0].text.trim();
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const match = cleaned.match(/\[[\s\S]*\]/);
   if (!match) throw new Error(`Claude did not return a valid JSON array. Got: ${raw.slice(0, 300)}`);
