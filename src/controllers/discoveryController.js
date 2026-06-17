@@ -2,6 +2,7 @@ const supabase = require('../config/supabase');
 const discoveryService = require('../services/discoveryService');
 const phantombusterService = require('../services/phantombusterService');
 const apolloService = require('../services/apolloService');
+const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
 
 async function listRuns(req, res) {
@@ -177,4 +178,18 @@ async function dismissSignal(req, res) {
   }
 }
 
-module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal };
+async function findByDescription(req, res) {
+  console.log('by-description route hit:', req.body);
+  try {
+    const { description, industry, geography, audience, companySize } = req.body;
+    if (!description) return res.status(400).json({ error: 'description is required' });
+
+    const companies = await claudeService.findCompaniesByDescription({ description, industry, geography, audience, companySize });
+    res.json(companies);
+  } catch (err) {
+    logError('findByDescription (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal, findByDescription };

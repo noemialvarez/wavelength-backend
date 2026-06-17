@@ -7,6 +7,9 @@ router.post('/runs', discoveryController.startRun);
 router.post('/scan', discoveryController.startRun);
 router.get('/runs/:id', discoveryController.getRun);
 
+// AI-powered company discovery from a description
+router.post('/by-description', discoveryController.findByDescription);
+
 // Raw signals before they become leads
 router.get('/signals', discoveryController.listSignals);
 router.post('/signals/:id/promote', discoveryController.promoteSignalToLead);
