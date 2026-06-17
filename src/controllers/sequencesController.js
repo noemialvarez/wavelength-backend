@@ -152,4 +152,56 @@ async function syncFromLemlist(req, res) {
   }
 }
 
-module.exports = { listSequences, getSequence, getSequenceLeads, listAllSequenceLeads, syncFromLemlist };
+async function getStatus(req, res) {
+  try {
+    const { data: settings } = await supabase
+      .from('positioning').select('lemlist_campaign_id').limit(1).maybeSingle();
+
+    const campaignId = settings?.lemlist_campaign_id || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
+    if (!campaignId) {
+      return res.status(400).json({ error: 'No campaign ID configured — save one in Email Outreach Settings.' });
+    }
+
+    const lemlistLeads = await lemlistService.getCampaignLeads(campaignId);
+
+    const lemlistIds = lemlistLeads.map(l => l._id).filter(Boolean);
+    const leadMap = {};
+    if (lemlistIds.length > 0) {
+      const { data: drafts } = await supabase
+        .from('outreach_drafts')
+        .select('lemlist_id, leads(name, company, email)')
+        .in('lemlist_id', lemlistIds);
+      for (const d of drafts ?? []) {
+        if (d.lemlist_id && d.leads) leadMap[d.lemlist_id] = d.leads;
+      }
+    }
+
+    const LEMLIST_STATUS_MAP = {
+      contacted:     'sent',
+      inProgress:    'opened',
+      interested:    'replied',
+      notInterested: 'replied',
+      unsubscribed:  'bounced',
+      bounced:       'bounced',
+    };
+
+    const result = lemlistLeads.map(l => {
+      const lead = leadMap[l._id] || {};
+      return {
+        id: l._id,
+        name: lead.name || '',
+        company: lead.company || '',
+        email: lead.email || l._id,
+        status: LEMLIST_STATUS_MAP[l.state ?? l.status] ?? 'sent',
+        last_updated: l.lastEmailSentAt || l.updatedAt || null,
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    logError('getStatus (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+module.exports = { listSequences, getSequence, getSequenceLeads, listAllSequenceLeads, syncFromLemlist, getStatus };
