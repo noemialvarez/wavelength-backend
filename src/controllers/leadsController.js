@@ -56,6 +56,9 @@ function sanitizeLeadPayload(body) {
     delete mapped.company_name;
   }
 
+  // if name still missing, fall back to company
+  if (!mapped.name && mapped.company) mapped.name = mapped.company;
+
   // camelCase aliases
   if (mapped.signalSummary !== undefined) { if (!mapped.notes)        mapped.notes        = mapped.signalSummary; delete mapped.signalSummary; }
   if (mapped.founderName   !== undefined) { if (!mapped.name)         mapped.name         = mapped.founderName;   delete mapped.founderName;   }
