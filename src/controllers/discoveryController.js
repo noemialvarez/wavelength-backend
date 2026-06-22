@@ -173,19 +173,27 @@ async function promoteSignalToLead(req, res) {
           }
         }
 
-        // Step 2: Apollo email enrichment — re-fetch to check current email state
-        const { data: freshLead } = await supabase.from('leads').select('email, enrichment_data').eq('id', lead.id).single();
+        // Step 2: Apollo person enrichment — pull both email and title.
+        // Apollo serves as a secondary source of truth for the role.
+        const { data: freshLead } = await supabase.from('leads').select('email, role, enrichment_data').eq('id', lead.id).single();
         console.log('Apollo check - email:', freshLead?.email, 'API key set:', !!process.env.APOLLO_API_KEY);
-        if (!freshLead?.email && apolloService.isConfigured()) {
-          const apolloEmail = await apolloService.findEmail(resolvedName, signal.company_name, resolvedLinkedin);
-          if (apolloEmail) {
-            console.log(`Apollo enrichment: found email ${apolloEmail} for lead ${resolvedName}`);
-            await supabase.from('leads').update({
-              email: apolloEmail,
-              enrichment_data: { ...(freshLead?.enrichment_data || {}), email_source: 'apollo' },
-            }).eq('id', lead.id);
+        if (apolloService.isConfigured()) {
+          const person = await apolloService.findPerson(resolvedName, signal.company_name, resolvedLinkedin);
+          if (person) {
+            const update = {};
+            if (person.email && !freshLead?.email) {
+              update.email = person.email;
+              update.enrichment_data = { ...(freshLead?.enrichment_data || {}), email_source: 'apollo' };
+              console.log(`Apollo enrichment: found email ${person.email} for lead ${resolvedName}`);
+            }
+            if (!freshLead?.role && (person.title || person.headline)) {
+              update.role = person.title || person.headline;
+            }
+            if (Object.keys(update).length) {
+              await supabase.from('leads').update(update).eq('id', lead.id);
+            }
           } else {
-            console.log(`Apollo enrichment: no email found for lead ${resolvedName}`);
+            console.log(`Apollo enrichment: no person record for lead ${resolvedName}`);
           }
         }
       } catch (e) {

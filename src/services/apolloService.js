@@ -6,13 +6,14 @@ function isConfigured() {
 }
 
 /**
- * Look up a person's email via Apollo People Match.
- * Returns the email string on success, null if not found or key not configured.
+ * Look up a person via Apollo People Match.
+ * Returns { email, title, headline } on success (any of which may be null),
+ * or null if not found / key not configured.
  * Never throws — failures are logged and swallowed so the caller flow continues.
  */
-async function findEmail(name, company, linkedin_url) {
+async function findPerson(name, company, linkedin_url) {
   if (!isConfigured()) {
-    console.log('[Apollo] API key not configured — skipping email lookup');
+    console.log('[Apollo] API key not configured — skipping people lookup');
     return null;
   }
   if (!name || !company) return null;
@@ -46,13 +47,17 @@ async function findEmail(name, company, linkedin_url) {
 
     console.log('[Apollo] Full response:', JSON.stringify(data, null, 2));
 
-    const email = data?.person?.email;
+    const person = data?.person || null;
+    const email = person?.email || null;
+    const title = person?.title || null;
+    const headline = person?.headline || null;
     if (email) {
-      console.log(`[Apollo] Found email for ${name} @ ${company}: ${email}`);
+      console.log(`[Apollo] Found email for ${name} @ ${company}: ${email} (title: ${title})`);
     } else {
-      console.log(`[Apollo] No email found for ${name} @ ${company}`);
+      console.log(`[Apollo] No email found for ${name} @ ${company} (title: ${title})`);
     }
-    return email || null;
+    if (!person) return null;
+    return { email, title, headline };
   } catch (err) {
     const status = err?.response?.status;
     console.error('[Apollo] Error response:', JSON.stringify(err?.response?.data, null, 2));
@@ -61,10 +66,16 @@ async function findEmail(name, company, linkedin_url) {
     } else if (status === 429) {
       console.error('[Apollo] Rate limit hit');
     } else {
-      console.error('[Apollo] findEmail error:', err.message);
+      console.error('[Apollo] findPerson error:', err.message);
     }
     return null;
   }
+}
+
+// Backward-compatible wrapper for callers that only need the email.
+async function findEmail(name, company, linkedin_url) {
+  const person = await findPerson(name, company, linkedin_url);
+  return person?.email || null;
 }
 
 /**
@@ -95,4 +106,4 @@ async function getCompanyEmployeeCount(domain) {
   }
 }
 
-module.exports = { isConfigured, findEmail, getCompanyEmployeeCount };
+module.exports = { isConfigured, findEmail, findPerson, getCompanyEmployeeCount };

@@ -244,20 +244,26 @@ async function findFounder(req, res) {
       };
     }
 
-    // Once we have an actual person name, look up their email via Apollo.
-    let apolloEmail = null;
-    if (payload?.name && !lead.email && apolloService.isConfigured()) {
-      apolloEmail = await apolloService.findEmail(
+    // Once we have an actual person name, look up email + title via Apollo.
+    // Apollo serves as a secondary source of truth for the title when
+    // Phantombuster's profile didn't expose one.
+    if (payload?.name && apolloService.isConfigured()) {
+      const person = await apolloService.findPerson(
         payload.name,
         lead.company,
         payload.linkedin_url || lead.linkedin_url,
       );
-      if (apolloEmail) {
-        payload.email = apolloEmail;
-        payload.enrichment_data = {
-          ...(payload.enrichment_data || lead.enrichment_data || {}),
-          email_source: 'apollo',
-        };
+      if (person) {
+        if (person.email && !lead.email) {
+          payload.email = person.email;
+          payload.enrichment_data = {
+            ...(payload.enrichment_data || lead.enrichment_data || {}),
+            email_source: 'apollo',
+          };
+        }
+        if (!payload.role && (person.title || person.headline)) {
+          payload.role = person.title || person.headline;
+        }
       }
     }
 
