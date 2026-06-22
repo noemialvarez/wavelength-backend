@@ -71,18 +71,26 @@ async function getAgentOutput(agentId) {
   return data;
 }
 
-function pickFounder(results) {
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function pickProfile(results, searchTitle) {
   console.log('[phantombuster] profiles count:', results.length);
   if (results.length > 0) {
     console.log('[phantombuster] first profile keys:', Object.keys(results[0]));
     console.log('[phantombuster] profiles array:', JSON.stringify(results));
   }
-  var leaderRe = /founder|co.founder|ceo|chief executive|president/i;
-  var founderMatch = results.find(function(r) {
+  // Build a regex that prefers profiles matching the searched title.
+  // Fallback to the historical leader regex when no specific title was provided.
+  var preferRe = searchTitle
+    ? new RegExp(escapeRegex(searchTitle), 'i')
+    : /founder|co.founder|ceo|chief executive|president/i;
+  var match = results.find(function(r) {
     var title = r.title ? r.title : (r.occupation ? r.occupation : (r.currentJob ? r.currentJob : (r.jobTitle ? r.jobTitle : '')));
-    return leaderRe.test(title);
+    return preferRe.test(title);
   });
-  var finalResult = founderMatch ? founderMatch : (results[0] ? results[0] : null);
+  var finalResult = match ? match : (results[0] ? results[0] : null);
   console.log('[phantombuster] picked result:', JSON.stringify(finalResult));
   return finalResult;
 }
@@ -103,11 +111,14 @@ async function fetchS3Results(outputText) {
   return profiles;
 }
 
-async function launchFounderSearch(companyName) {
-  // 1. Return per-company cached result if still fresh
-  const cached = resultCache.get(companyName);
+async function launchFounderSearch(companyName, searchTitle) {
+  const title = (searchTitle && String(searchTitle).trim()) || 'founder';
+  const cacheKey = `${companyName}::${title.toLowerCase()}`;
+
+  // 1. Return per-(company, title) cached result if still fresh
+  const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-    console.log('[phantombuster] cache hit for', companyName, '— returning cached result');
+    console.log('[phantombuster] cache hit for', cacheKey, '— returning cached result');
     return cached.result;
   }
 
@@ -117,7 +128,7 @@ async function launchFounderSearch(companyName) {
   if (agentInFlight.has(agentId)) {
     console.log('[phantombuster] agent already running, waiting for in-flight run to finish');
     await agentInFlight.get(agentId).catch(() => {});
-    const fresh = resultCache.get(companyName);
+    const fresh = resultCache.get(cacheKey);
     if (fresh && Date.now() - fresh.ts < CACHE_TTL_MS) return fresh.result;
   }
 
@@ -134,8 +145,11 @@ async function launchFounderSearch(companyName) {
   const runPromise = (async () => {
     agentLastLaunch.set(agentId, Date.now());
 
+    // Quote multi-word titles so LinkedIn search treats them as one phrase
+    const titleKeyword = title.includes(' ') ? `"${title}"` : title;
     const searchUrl =
-      `https://www.linkedin.com/search/results/people/?keywords=founder+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+      `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(titleKeyword)}+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+    console.log('[phantombuster] search url:', searchUrl);
 
     const launch = await launchAgent(agentId, {
       search: searchUrl,
@@ -145,9 +159,9 @@ async function launchFounderSearch(companyName) {
 
     const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
     const profiles = await fetchS3Results(agentOutput.output);
-    const result = pickFounder(profiles);
+    const result = pickProfile(profiles, searchTitle);
 
-    resultCache.set(companyName, { result, ts: Date.now() });
+    resultCache.set(cacheKey, { result, ts: Date.now() });
     return result;
   })().finally(() => {
     agentInFlight.delete(agentId);

@@ -4,6 +4,7 @@ const phantombusterService = require('../services/phantombusterService');
 const apolloService = require('../services/apolloService');
 const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
+const { sortBySeniority } = require('../utils/titleSeniority');
 
 async function listRuns(req, res) {
   try {
@@ -90,6 +91,17 @@ async function promoteSignalToLead(req, res) {
 
     if (signalError) { logError('promoteSignalToLead fetch', signalError); return res.status(404).json({ error: 'Signal not found' }); }
 
+    // Optional target titles passed in from the frontend (Option 1 ICP titles).
+    // When present, the lead's founder discovery searches each title most-senior first.
+    const rawTitles = Array.isArray(req.body?.titles) ? req.body.titles
+      : Array.isArray(req.body?.target_titles) ? req.body.target_titles
+      : [];
+    const targetTitles = rawTitles
+      .map((t) => (typeof t === 'string' ? t.trim() : ''))
+      .filter(Boolean);
+
+    const enrichmentData = targetTitles.length ? { target_titles: targetTitles } : null;
+
     const { data: lead, error: leadError } = await supabase
       .from('leads')
       .insert({
@@ -101,6 +113,7 @@ async function promoteSignalToLead(req, res) {
         source: signal.source,
         signal_id: signal.id,
         status: 'enriched',
+        ...(enrichmentData ? { enrichment_data: enrichmentData } : {}),
       })
       .select()
       .single();
@@ -114,21 +127,37 @@ async function promoteSignalToLead(req, res) {
 
     if (signalUpdateError) logError('promoteSignalToLead signal update', signalUpdateError);
 
-    // Auto-enrich in background: Phantombuster first (for linkedin_url), then Apollo for email
+    // Auto-enrich in background: Phantombuster first (for linkedin_url), then Apollo for email.
+    // When target titles are provided, iterate them most-senior → least-senior and stop at the first hit;
+    // otherwise fall back to the legacy "founder" search.
     setImmediate(async () => {
       try {
         let resolvedName = lead.name;
         let resolvedLinkedin = lead.linkedin_url;
+        let matchedTitle = null;
 
-        // Step 1: Phantombuster — get linkedin_url before calling Apollo
         if (signal.company_name && process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID) {
-          const result = await phantombusterService.launchFounderSearch(signal.company_name);
+          const orderedTitles = sortBySeniority(targetTitles);
+          const searchOrder = orderedTitles.length ? orderedTitles : [null];
+
+          let result = null;
+          for (const t of searchOrder) {
+            console.log(`[promoteSignalToLead] trying title "${t || 'founder'}" for ${signal.company_name}`);
+            const r = await phantombusterService.launchFounderSearch(signal.company_name, t);
+            if (r && (r.name || r.firstName || r.profileUrl || r.linkedinUrl || r.url)) {
+              result = r;
+              matchedTitle = t;
+              break;
+            }
+          }
+
           if (result) {
             const pbName = result.name || [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
             const pbLinkedin = result.profileUrl || result.linkedinUrl || result.url || null;
             const patch = {};
             if (pbName && !signal.founder_name) { patch.name = pbName; resolvedName = pbName; }
             if (pbLinkedin) { patch.linkedin_url = pbLinkedin; resolvedLinkedin = pbLinkedin; }
+            if (matchedTitle) patch.role = matchedTitle;
             if (Object.keys(patch).length) {
               await supabase.from('leads').update(patch).eq('id', lead.id);
               console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data`);
@@ -137,7 +166,7 @@ async function promoteSignalToLead(req, res) {
         }
 
         // Step 2: Apollo email enrichment — re-fetch to check current email state
-        const { data: freshLead } = await supabase.from('leads').select('email').eq('id', lead.id).single();
+        const { data: freshLead } = await supabase.from('leads').select('email, enrichment_data').eq('id', lead.id).single();
         console.log('Apollo check - email:', freshLead?.email, 'API key set:', !!process.env.APOLLO_API_KEY);
         if (!freshLead?.email && apolloService.isConfigured()) {
           const apolloEmail = await apolloService.findEmail(resolvedName, signal.company_name, resolvedLinkedin);
@@ -145,7 +174,7 @@ async function promoteSignalToLead(req, res) {
             console.log(`Apollo enrichment: found email ${apolloEmail} for lead ${resolvedName}`);
             await supabase.from('leads').update({
               email: apolloEmail,
-              enrichment_data: { email_source: 'apollo' },
+              enrichment_data: { ...(freshLead?.enrichment_data || {}), email_source: 'apollo' },
             }).eq('id', lead.id);
           } else {
             console.log(`Apollo enrichment: no email found for lead ${resolvedName}`);
