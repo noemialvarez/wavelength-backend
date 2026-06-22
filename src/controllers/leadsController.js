@@ -193,9 +193,12 @@ function founderPayload(result) {
   var nameParts = [result.firstName, result.lastName].filter(Boolean);
   var name = result.name ? result.name : (nameParts.length ? nameParts.join(' ') : null);
   var linkedin_url = result.profileUrl ? result.profileUrl : (result.linkedinUrl ? result.linkedinUrl : (result.url ? result.url : null));
+  // Actual job title from the LinkedIn profile — fall back across common Phantombuster shapes.
+  var role = result.title || result.occupation || result.currentJob || result.jobTitle || result.headline || null;
   var payload = {};
   if (name) payload.name = name;
   if (linkedin_url) payload.linkedin_url = linkedin_url;
+  if (role) payload.role = role;
   return Object.keys(payload).length ? payload : null;
 }
 
@@ -230,7 +233,16 @@ async function findFounder(req, res) {
     }
 
     const payload = founderPayload(result);
-    if (payload && matchedTitle) payload.role = matchedTitle;
+    // founderPayload already set role to the actual profile title if available.
+    // Fall back to the searched title if the profile didn't expose one.
+    if (payload && !payload.role && matchedTitle) payload.role = matchedTitle;
+    // Always remember what we searched for, separately from the resolved role.
+    if (payload && matchedTitle) {
+      payload.enrichment_data = {
+        ...(lead.enrichment_data || {}),
+        matched_title: matchedTitle,
+      };
+    }
 
     // Once we have an actual person name, look up their email via Apollo.
     let apolloEmail = null;
@@ -243,7 +255,7 @@ async function findFounder(req, res) {
       if (apolloEmail) {
         payload.email = apolloEmail;
         payload.enrichment_data = {
-          ...(lead.enrichment_data || {}),
+          ...(payload.enrichment_data || lead.enrichment_data || {}),
           email_source: 'apollo',
         };
       }

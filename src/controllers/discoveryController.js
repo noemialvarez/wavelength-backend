@@ -154,13 +154,21 @@ async function promoteSignalToLead(req, res) {
           if (result) {
             const pbName = result.name || [result.firstName, result.lastName].filter(Boolean).join(' ') || null;
             const pbLinkedin = result.profileUrl || result.linkedinUrl || result.url || null;
+            // Actual job title from the LinkedIn profile, with fallback to the searched title.
+            const pbRole = result.title || result.occupation || result.currentJob || result.jobTitle || result.headline || matchedTitle || null;
             const patch = {};
             if (pbName && !signal.founder_name) { patch.name = pbName; resolvedName = pbName; }
             if (pbLinkedin) { patch.linkedin_url = pbLinkedin; resolvedLinkedin = pbLinkedin; }
-            if (matchedTitle) patch.role = matchedTitle;
+            if (pbRole) patch.role = pbRole;
+            if (matchedTitle) {
+              patch.enrichment_data = {
+                ...(lead.enrichment_data || {}),
+                matched_title: matchedTitle,
+              };
+            }
             if (Object.keys(patch).length) {
               await supabase.from('leads').update(patch).eq('id', lead.id);
-              console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data`);
+              console.log(`[promoteSignalToLead] auto-enriched lead ${lead.id} with founder data (role: ${pbRole})`);
             }
           }
         }
