@@ -69,7 +69,8 @@ async function addLeadToSequence(lead, draft, campaignId) {
     const { data } = await client().post(`/campaigns/${campaignId}/leads/${encodeURIComponent(email)}`, payload);
     return data;
   } catch (err) {
-    console.error('[Lemlist] 400 response body:', JSON.stringify(err?.response?.data));
+    const status = err?.response?.status;
+    console.error(`[Lemlist] ${status || 'unknown'} response body:`, JSON.stringify(err?.response?.data));
     throw err;
   }
 }

@@ -243,6 +243,20 @@ async function approveAndSend(req, res) {
     res.json({ success: true, pushed: !lemlistResult.skipped, lemlist: lemlistResult });
   } catch (err) {
     logError('approveAndSend (thrown)', err);
+    // If the failure came from an upstream HTTP call (e.g. Lemlist), forward its
+    // real status and human-readable reason instead of the generic axios string.
+    const upstreamStatus = err?.response?.status;
+    if (upstreamStatus) {
+      const body = err?.response?.data;
+      const upstreamMessage =
+        (body && typeof body === 'object' && (body.message || body.error || body.reason)) ||
+        (typeof body === 'string' ? body : null) ||
+        err.message;
+      return res.status(upstreamStatus).json({
+        error: `Lemlist (${upstreamStatus}): ${upstreamMessage}`,
+        upstream: { service: 'lemlist', status: upstreamStatus, message: upstreamMessage },
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 }
