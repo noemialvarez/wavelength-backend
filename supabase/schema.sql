@@ -23,12 +23,24 @@ create table if not exists leads (
   notes         text,
   enrichment_data jsonb default '{}',
   enriched_at   timestamptz,
+  purpose_of_contact text,
+  linkedin_connection_status text not null default 'not_sent', -- not_sent | requested | accepted | declined
+  linkedin_connection_requested_at timestamptz,
+  linkedin_connection_accepted_at  timestamptz,
+  linkedin_message_status text not null default 'waiting',     -- waiting | ready | drafted | sent
+  linkedin_message_draft  text,
+  linkedin_message_sent_at timestamptz,
+  linkedin_replied_at      timestamptz,
+  linkedin_reminder_sent_at timestamptz,
+  linkedin_reminder_draft  text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
 
 create index on leads(created_by);
 create index on leads(status);
+create index on leads(linkedin_connection_status);
+create index on leads(linkedin_message_status);
 
 -- ============================================================
 -- 2. DISCOVERY

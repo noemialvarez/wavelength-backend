@@ -35,6 +35,9 @@ async function getCampaignLeads(campaignId) {
 }
 
 
+// Email outreach only — LinkedIn sends go through Phantombuster's LinkedIn
+// Message Sender instead (see phantombusterService.sendLinkedInMessage),
+// since LinkedIn steps on Lemlist require their paid Multichannel tier.
 async function addLeadToSequence(lead, draft, campaignId) {
   console.log('LEMLIST_API_KEY present:', !!process.env.LEMLIST_API_KEY);
   campaignId = campaignId || process.env.LEMLIST_DEFAULT_CAMPAIGN_ID;
@@ -49,9 +52,10 @@ async function addLeadToSequence(lead, draft, campaignId) {
     return { _id: `skipped_${Date.now()}`, skipped: true, reason: 'No sequence ID — add one in Settings' };
   }
 
+  // Lemlist's lead-add endpoint is keyed by email (/campaigns/:id/leads/:email).
   const email = lead.email;
   if (!email) {
-    throw new Error(`Lead "${lead.name || lead.id}" has no email address — cannot push to Lemlist`);
+    throw new Error(`Lead "${lead.name || lead.id}" has no email address — cannot push to Lemlist.`);
   }
 
   const payload = {

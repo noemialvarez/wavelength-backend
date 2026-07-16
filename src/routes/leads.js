@@ -19,4 +19,16 @@ router.post('/:id/find-email', leadsController.findLeadEmail);
 // Bulk import from a discovery run
 router.post('/import', leadsController.importLeads);
 
+// Create a lead from an Option 4 "by name" candidate and send a connection request
+router.post('/by-name/connect', leadsController.connectByName);
+
+// LinkedIn outreach message (post-connection) — draft, edit, approve & push to Lemlist
+router.post('/:id/linkedin-message/draft', leadsController.draftLinkedinMessage);
+router.patch('/:id/linkedin-message', leadsController.updateLinkedinMessage);
+router.post('/:id/linkedin-message/approve', leadsController.approveLinkedinMessage);
+
+// LinkedIn reminder (3-day no-reply follow-up) — draft + approve & push to Lemlist
+router.post('/:id/linkedin-reminder/draft', leadsController.draftLinkedinReminder);
+router.post('/:id/linkedin-reminder/approve', leadsController.approveLinkedinReminder);
+
 module.exports = router;

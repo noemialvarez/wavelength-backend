@@ -10,6 +10,12 @@ router.get('/runs/:id', discoveryController.getRun);
 // AI-powered company discovery from a description
 router.post('/by-description', discoveryController.findByDescription);
 
+// Structured ICP-filter company discovery (Option 1)
+router.post('/by-icp', discoveryController.findByIcp);
+
+// LinkedIn people search by name (Option 4 — "by name" discovery)
+router.post('/by-name', discoveryController.findByName);
+
 // Raw signals before they become leads
 router.get('/signals', discoveryController.listSignals);
 router.post('/signals/:id/promote', discoveryController.promoteSignalToLead);

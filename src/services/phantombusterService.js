@@ -5,7 +5,7 @@ const pb = axios.create({
   headers: { 'X-Phantombuster-Key': process.env.PHANTOMBUSTER_API_KEY },
 });
 
-// Per-company result cache: companyName -> { result, ts }
+// Per-cacheKey result cache: cacheKey -> { result, ts }
 const resultCache = new Map();
 // Per-agent in-flight promise: agentId -> Promise
 const agentInFlight = new Map();
@@ -111,20 +111,16 @@ async function fetchS3Results(outputText) {
   return profiles;
 }
 
-async function launchFounderSearch(companyName, searchTitle) {
-  const title = (searchTitle && String(searchTitle).trim()) || 'founder';
-  const cacheKey = `${companyName}::${title.toLowerCase()}`;
-
-  // 1. Return per-(company, title) cached result if still fresh
+// Shared queued-launch helper: caches by cacheKey, serialises + rate-limits per agentId
+// so concurrent callers targeting the same Phantombuster agent don't blow its parallelism
+// limit. Both people-search flows (founder search, by-name search) share this.
+async function runSearchAgent(agentId, cacheKey, launchArgs) {
   const cached = resultCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     console.log('[phantombuster] cache hit for', cacheKey, '— returning cached result');
     return cached.result;
   }
 
-  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
-
-  // 2. If the agent is already running, wait for it then re-check cache
   if (agentInFlight.has(agentId)) {
     console.log('[phantombuster] agent already running, waiting for in-flight run to finish');
     await agentInFlight.get(agentId).catch(() => {});
@@ -132,7 +128,6 @@ async function launchFounderSearch(companyName, searchTitle) {
     if (fresh && Date.now() - fresh.ts < CACHE_TTL_MS) return fresh.result;
   }
 
-  // 3. Enforce 30s minimum gap between launches
   const lastLaunch = agentLastLaunch.get(agentId) || 0;
   const msSinceLast = Date.now() - lastLaunch;
   if (msSinceLast < MIN_LAUNCH_INTERVAL_MS) {
@@ -141,34 +136,155 @@ async function launchFounderSearch(companyName, searchTitle) {
     await new Promise(r => setTimeout(r, waitMs));
   }
 
-  // 4. Launch and register the in-flight promise so concurrent callers queue behind it
   const runPromise = (async () => {
     agentLastLaunch.set(agentId, Date.now());
-
-    // Quote multi-word titles so LinkedIn search treats them as one phrase
-    const titleKeyword = title.includes(' ') ? `"${title}"` : title;
-    const searchUrl =
-      `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(titleKeyword)}+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
-    console.log('[phantombuster] search url:', searchUrl);
-
-    const launch = await launchAgent(agentId, {
-      search: searchUrl,
-      sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
-      numberOfResultsPerSearch: 10,
-    });
-
+    const launch = await launchAgent(agentId, launchArgs);
     const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
     const profiles = await fetchS3Results(agentOutput.output);
-    const result = pickProfile(profiles, searchTitle);
-
-    resultCache.set(cacheKey, { result, ts: Date.now() });
-    return result;
+    resultCache.set(cacheKey, { result: profiles, ts: Date.now() });
+    return profiles;
   })().finally(() => {
     agentInFlight.delete(agentId);
   });
 
   agentInFlight.set(agentId, runPromise);
   return runPromise;
+}
+
+async function launchFounderSearch(companyName, searchTitle) {
+  const title = (searchTitle && String(searchTitle).trim()) || 'founder';
+  const cacheKey = `founder::${companyName}::${title.toLowerCase()}`;
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+
+  const titleKeyword = title.includes(' ') ? `"${title}"` : title;
+  const searchUrl =
+    `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(titleKeyword)}+${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+  console.log('[phantombuster] search url:', searchUrl);
+
+  const profiles = await runSearchAgent(agentId, cacheKey, {
+    search: searchUrl,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    numberOfResultsPerSearch: 10,
+  });
+
+  return pickProfile(profiles, searchTitle);
+}
+
+// Search LinkedIn by a specific person's name (Option 4 — "by name" discovery).
+// Reuses the same search-export agent as founder search since both just need
+// a LinkedIn people-search URL + result export; no separate agent required.
+async function searchPersonByName(firstName, lastName, company) {
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+  const keywords = company ? `${fullName} ${company}` : fullName;
+  const cacheKey = `by-name::${keywords.toLowerCase()}`;
+  const searchUrl =
+    `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}&origin=GLOBAL_SEARCH_HEADER`;
+  console.log('[phantombuster] by-name search url:', searchUrl);
+
+  const profiles = await runSearchAgent(agentId, cacheKey, {
+    search: searchUrl,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    numberOfResultsPerSearch: 5,
+  });
+
+  // Return the search URL alongside the results so the connect step can reuse
+  // the exact same search rather than reconstructing one — the connect agent
+  // (a different phantom, different argument schema) also runs search-then-act,
+  // so re-running an equivalent query keeps the "who gets connected with"
+  // identical to what the user was shown and approved.
+  return { searchUrl, profiles: profiles.slice(0, 5) };
+}
+
+function isConnectAgentConfigured() {
+  return !!process.env.PHANTOMBUSTER_CONNECT_AGENT_ID;
+}
+
+// Sends a LinkedIn connection request via Phantombuster's "LinkedIn Search to
+// Lead Connection" agent. Requires PHANTOMBUSTER_CONNECT_AGENT_ID to be set up
+// in the Phantombuster account — see README for setup notes. Throws a clear
+// error if not configured rather than silently no-op'ing, so callers surface
+// it to the user instead of hanging.
+//
+// Argument schema confirmed via GET /agents/fetch against a live agent
+// (Phantombuster's public docs named a different key than what's actually
+// saved): `queries` + `inputType` + `message`, not a bare profile-URL list.
+// It's fundamentally a "search then connect with the results" tool, so we
+// pass the *same* LinkedIn search URL that already surfaced this candidate
+// during the by-name search step (see searchPersonByName) rather than
+// reconstructing one — that keeps the person who gets connected-with
+// identical to the one the user saw and approved.
+async function sendConnectionRequest(searchUrl, note) {
+  if (!isConnectAgentConfigured()) {
+    throw new Error(
+      'PHANTOMBUSTER_CONNECT_AGENT_ID is not configured — set up a LinkedIn Search to Lead Connection agent in Phantombuster and add its ID to the backend env vars',
+    );
+  }
+  const agentId = process.env.PHANTOMBUSTER_CONNECT_AGENT_ID;
+  const launch = await launchAgent(agentId, {
+    inputType: 'Regular LinkedIn Search',
+    queries: searchUrl,
+    // Capped to 1 so this only ever acts on the top match of the narrow
+    // "FirstName LastName Company" search built by searchPersonByName —
+    // never sends requests to other people the search might also surface.
+    numberOfResultsPerInput: 1,
+    message: note || '',
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+  });
+  return waitForAgent(agentId, launch.containerId);
+}
+
+function isConnectionsCheckAgentConfigured() {
+  return !!process.env.PHANTOMBUSTER_CONNECTIONS_AGENT_ID;
+}
+
+// Fetches the current list of 1st-degree LinkedIn connections via
+// Phantombuster's "LinkedIn Connections Export" agent, used by the
+// acceptance-polling cron to detect which pending connection requests have
+// been accepted. Returns null (not an empty array) when the agent isn't
+// configured, so callers can distinguish "not set up yet" from "checked,
+// found nothing". Argument schema confirmed via agents/fetch: numberOfProfiles
+// + sortBy + sessionCookie. Sorted newest-first, capped at 100 — comfortably
+// covers new acceptances between polling runs (see cronService).
+async function fetchAcceptedConnections() {
+  if (!isConnectionsCheckAgentConfigured()) return null;
+  const agentId = process.env.PHANTOMBUSTER_CONNECTIONS_AGENT_ID;
+  const launch = await launchAgent(agentId, {
+    numberOfProfiles: 100,
+    sortBy: 'Recently added',
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+  });
+  const output = await waitForAgent(agentId, launch.containerId, 5000, 180000);
+  return fetchS3Results(output.output);
+}
+
+function isMessageAgentConfigured() {
+  return !!process.env.PHANTOMBUSTER_MESSAGE_AGENT_ID;
+}
+
+// Sends a LinkedIn DM to an existing 1st-degree connection via Phantombuster's
+// "LinkedIn Message Sender" agent — used for both the initial post-connection
+// outreach message and the 3-day no-reply reminder (Lemlist only handles the
+// email-escalation fallback; it isn't in the loop for LinkedIn sends at all,
+// since that requires Lemlist's paid Multichannel tier).
+//
+// Argument schema confirmed via agents/fetch: `spreadsheetUrl` + `message` +
+// `sessionCookie`. Unlike the Connect agent, spreadsheetUrl accepts a bare
+// profile URL directly (confirmed empirically), so no search-URL workaround
+// is needed here — lead.linkedin_url is passed straight through.
+async function sendLinkedInMessage(profileUrl, message) {
+  if (!isMessageAgentConfigured()) {
+    throw new Error(
+      'PHANTOMBUSTER_MESSAGE_AGENT_ID is not configured — set up a LinkedIn Message Sender agent in Phantombuster and add its ID to the backend env vars',
+    );
+  }
+  const agentId = process.env.PHANTOMBUSTER_MESSAGE_AGENT_ID;
+  const launch = await launchAgent(agentId, {
+    spreadsheetUrl: profileUrl,
+    message,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+  });
+  return waitForAgent(agentId, launch.containerId);
 }
 
 async function enrichFounder(lead) {
@@ -214,4 +330,17 @@ async function postLinkedInComment(postUrl, commentText) {
   return waitForAgent(agentId, launch.containerId);
 }
 
-module.exports = { getAgentOutput, launchFounderSearch, enrichFounder, fetchLinkedInActivity, postLinkedInComment };
+module.exports = {
+  getAgentOutput,
+  launchFounderSearch,
+  searchPersonByName,
+  isConnectAgentConfigured,
+  sendConnectionRequest,
+  isConnectionsCheckAgentConfigured,
+  fetchAcceptedConnections,
+  isMessageAgentConfigured,
+  sendLinkedInMessage,
+  enrichFounder,
+  fetchLinkedInActivity,
+  postLinkedInComment,
+};

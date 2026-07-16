@@ -277,4 +277,94 @@ async function findByDescription(req, res) {
   }
 }
 
-module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal, findByDescription };
+// Option 1 — "By ICP filters". Was called by the frontend but never had a
+// backend route (a pre-existing gap, unrelated to the LinkedIn funnel work).
+// Reuses the same Claude + Apollo size-verification pipeline as by-description,
+// just built from structured filters instead of a free-text description —
+// except when explicit company names are given, which are resolved directly
+// without a Claude round-trip since there's nothing to infer.
+async function findByIcp(req, res) {
+  console.log('by-icp route hit:', req.body);
+  try {
+    const companyNames = Array.isArray(req.body.companyNames) ? req.body.companyNames.filter(Boolean) : [];
+    const jobTitles = Array.isArray(req.body.jobTitles) ? req.body.jobTitles.filter(Boolean) : [];
+    const industries = Array.isArray(req.body.industries) ? req.body.industries.filter(Boolean) : [];
+    const companySizes = Array.isArray(req.body.companySizes) ? req.body.companySizes.filter(Boolean) : [];
+    const geography = req.body.geography || '';
+
+    if (companyNames.length) {
+      const companies = companyNames.map((name) => ({
+        company_name: name,
+        website: '',
+        industry: industries.join(', '),
+        geography,
+        description: '',
+        why_match: 'Matched by company name filter',
+      }));
+      return res.json(companies);
+    }
+
+    if (!industries.length && !companySizes.length && !geography) {
+      return res.status(400).json({ error: 'Provide at least one filter: company names, industries, company size, or geography' });
+    }
+
+    const description = `Companies matching: ${[
+      industries.length ? `industries ${industries.join(', ')}` : null,
+      geography ? `based in ${geography}` : null,
+      jobTitles.length ? `where relevant roles include ${jobTitles.join(', ')}` : null,
+    ].filter(Boolean).join('; ')}`;
+
+    const companySize = companySizes[0] || '';
+    console.log(`[findByIcp] derived description="${description}" companySize="${companySize}"`);
+
+    const companies = await claudeService.findCompaniesByDescription({
+      description, industry: industries.join(', '), geography, audience: 'B2B', companySize,
+    });
+
+    const sizeRange = parseSizeRange(companySize);
+    if (!sizeRange || !apolloService.isConfigured()) {
+      return res.json(companies.slice(0, 10));
+    }
+
+    const enriched = await Promise.all(
+      companies.map(async (c) => {
+        const count = await apolloService.getCompanyEmployeeCount(c.website);
+        const pass = count === null || (count >= sizeRange.min && count <= sizeRange.max);
+        return { ...c, _employee_count: count, _pass: pass };
+      })
+    );
+    const verified = enriched.filter((c) => c._pass);
+    const result = verified.slice(0, 10).map(({ _employee_count, _pass, ...rest }) => rest);
+    res.json(result);
+  } catch (err) {
+    logError('findByIcp (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+function candidatePayload(profile) {
+  const name = profile.name || [profile.firstName, profile.lastName].filter(Boolean).join(' ') || null;
+  const linkedin_url = profile.profileUrl || profile.linkedinUrl || profile.url || null;
+  const title = profile.title || profile.occupation || profile.currentJob || profile.jobTitle || profile.headline || null;
+  const company = profile.company || profile.companyName || null;
+  return { name, linkedin_url, title, company };
+}
+
+async function findByName(req, res) {
+  try {
+    const { firstName, lastName, company, purpose } = req.body;
+    if (!firstName || !lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
+
+    const { searchUrl, profiles } = await phantombusterService.searchPersonByName(firstName, lastName, company);
+    const candidates = profiles.map(candidatePayload).filter((c) => c.name || c.linkedin_url);
+
+    // search_url is carried through to /api/leads/by-name/connect so the
+    // connect step's own search-and-act agent targets the exact same person.
+    res.json({ data: candidates.map((c) => ({ ...c, purpose, search_url: searchUrl })) });
+  } catch (err) {
+    logError('findByName (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal, findByDescription, findByIcp, findByName };

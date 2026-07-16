@@ -47,6 +47,80 @@ Respond with ONLY valid JSON — no markdown, no explanation:
   return JSON.parse(match[0]);
 }
 
+async function draftLinkedInOutreachMessage(lead) {
+  const firstName = lead.name?.split(' ')[0] || lead.name || 'there';
+
+  const message = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 500,
+    messages: [
+      {
+        role: 'user',
+        content: `Draft a personalized LinkedIn message to send after a connection request was just accepted.
+
+RECIPIENT:
+First name: ${firstName}
+Company: ${lead.company || 'their company'}
+Role: ${lead.role || ''}
+LinkedIn headline / notes: ${lead.notes || ''}
+
+PURPOSE OF CONTACT (why we're reaching out — the message must clearly serve this):
+${lead.purpose_of_contact || 'General introduction'}
+
+RULES:
+- Greeting: "Hi ${firstName}," on its own line
+- Thank them briefly for connecting, then get straight to the purpose of contact above
+- Personalize using their role/company/notes where relevant — be specific, not generic
+- Conversational LinkedIn DM tone: shorter and less formal than an email
+- Max 4 sentences total (not counting greeting and sign-off)
+- Clear, low-friction ask tied to the purpose of contact
+- Sign off: "Best," on its own line (no name)
+- No "I hope this finds you well". No hollow compliments. No buzzwords.
+
+Respond with ONLY the message text — no JSON, no markdown, no explanation.`,
+      },
+    ],
+  });
+
+  return message.content[0].text.trim();
+}
+
+async function draftLinkedInReminder(lead) {
+  const firstName = lead.name?.split(' ')[0] || lead.name || 'there';
+
+  const message = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 300,
+    messages: [
+      {
+        role: 'user',
+        content: `Draft a short, friendly follow-up LinkedIn message. We messaged this person 3+ days ago and haven't heard back.
+
+RECIPIENT:
+First name: ${firstName}
+Company: ${lead.company || 'their company'}
+
+ORIGINAL MESSAGE SENT:
+${lead.linkedin_message_draft || '(not available)'}
+
+PURPOSE OF CONTACT:
+${lead.purpose_of_contact || 'General introduction'}
+
+RULES:
+- Greeting: "Hi ${firstName}," on its own line
+- Max 2 sentences total (not counting greeting and sign-off)
+- Light, no-pressure nudge — acknowledge they're busy, restate the ask in one line
+- Do not repeat the full original message, just reference it briefly
+- Sign off: "Best," on its own line (no name)
+
+Respond with ONLY the message text — no JSON, no markdown, no explanation.`,
+      },
+    ],
+  });
+
+  return message.content[0].text.trim();
+}
+
 async function draftLinkedInComment(activity) {
   const message = await client.messages.create({
     model: 'claude-opus-4-8',
@@ -113,4 +187,10 @@ Return this exact structure:
   return JSON.parse(match[0]);
 }
 
-module.exports = { draftOutreachEmail, draftLinkedInComment, findCompaniesByDescription };
+module.exports = {
+  draftOutreachEmail,
+  draftLinkedInOutreachMessage,
+  draftLinkedInReminder,
+  draftLinkedInComment,
+  findCompaniesByDescription,
+};

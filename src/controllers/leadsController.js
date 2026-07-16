@@ -1,6 +1,7 @@
 const supabase = require('../config/supabase');
 const phantombusterService = require('../services/phantombusterService');
 const apolloService = require('../services/apolloService');
+const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
 const { sortBySeniority } = require('../utils/titleSeniority');
 
@@ -9,7 +10,10 @@ const TITLE_DISCOVERY_SOURCES = new Set(['company_description', 'icp_filters']);
 
 async function listLeads(req, res) {
   try {
-    const { status, source, search, page = 1, limit = 50 } = req.query;
+    const {
+      status, source, search, page = 1, limit = 50,
+      linkedin_message_status, no_reply_days, stage,
+    } = req.query;
     const offset = (page - 1) * limit;
 
     let query = supabase
@@ -21,6 +25,27 @@ async function listLeads(req, res) {
     if (status) query = query.eq('status', status);
     if (source) query = query.eq('source', source);
     if (search) query = query.ilike('name', `%${search}%`);
+
+    // "No reply after N days" — LinkedIn message sent, no reply yet, no reminder sent yet.
+    if (linkedin_message_status === 'sent' && no_reply_days) {
+      const cutoff = new Date(Date.now() - Number(no_reply_days) * 24 * 60 * 60 * 1000).toISOString();
+      query = query
+        .eq('linkedin_message_status', 'sent')
+        .is('linkedin_replied_at', null)
+        .is('linkedin_reminder_sent_at', null)
+        .lte('linkedin_message_sent_at', cutoff);
+    } else if (linkedin_message_status) {
+      query = query.eq('linkedin_message_status', linkedin_message_status);
+    }
+
+    // Escalate-to-email cohort — reminder sent 3+ days ago, still no reply.
+    if (stage === 'email_escalation') {
+      const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      query = query
+        .is('linkedin_replied_at', null)
+        .not('linkedin_reminder_sent_at', 'is', null)
+        .lte('linkedin_reminder_sent_at', cutoff);
+    }
 
     const { data, error, count } = await query;
     if (error) { logError('listLeads', error); return res.status(500).json({ error: error.message }); }
@@ -48,7 +73,14 @@ async function getLead(req, res) {
 }
 
 // Valid writable columns in the leads table
-const LEAD_COLUMNS = new Set(['name', 'email', 'company', 'role', 'linkedin_url', 'source', 'signal_id', 'status', 'notes', 'enrichment_data', 'enriched_at', 'created_by']);
+const LEAD_COLUMNS = new Set([
+  'name', 'email', 'company', 'role', 'linkedin_url', 'source', 'signal_id', 'status', 'notes',
+  'enrichment_data', 'enriched_at', 'created_by',
+  'purpose_of_contact',
+  'linkedin_connection_status', 'linkedin_connection_requested_at', 'linkedin_connection_accepted_at',
+  'linkedin_message_status', 'linkedin_message_draft', 'linkedin_message_sent_at',
+  'linkedin_replied_at', 'linkedin_reminder_sent_at', 'linkedin_reminder_draft',
+]);
 
 function sanitizeLeadPayload(body) {
   const mapped = { ...body };
@@ -384,4 +416,204 @@ async function importLeads(req, res) {
   }
 }
 
-module.exports = { listLeads, getLead, createLead, updateLead, deleteLead, findFounder, enrichLead, findLeadEmail, importLeads };
+// Creates a lead from an Option 4 ("by name") search candidate and sends a
+// LinkedIn connection request via Phantombuster. The lead is always created —
+// if the connection request itself fails (e.g. agent not configured), that
+// failure is reported alongside the lead rather than losing the lead too.
+async function connectByName(req, res) {
+  try {
+    const { candidate, purpose } = req.body;
+    if (!candidate?.firstName || !candidate?.lastName) {
+      return res.status(400).json({ error: 'candidate.firstName and candidate.lastName are required' });
+    }
+
+    const name = candidate.name || [candidate.firstName, candidate.lastName].filter(Boolean).join(' ');
+    const payload = {
+      name,
+      company: candidate.company || null,
+      linkedin_url: candidate.linkedin_url || null,
+      role: candidate.title || null,
+      source: 'by_name',
+      status: 'new',
+      purpose_of_contact: purpose || candidate.purpose || null,
+      linkedin_connection_status: 'not_sent',
+    };
+
+    const { data: lead, error } = await supabase.from('leads').insert(payload).select().single();
+    if (error) { logError('connectByName insert', error); return res.status(400).json({ error: error.message }); }
+
+    // Best-effort Apollo email lookup now (not blocking), so the lead already
+    // has an email by the time it reaches "approve & push to Lemlist" later —
+    // Lemlist requires an email even to push a LinkedIn-step message.
+    if (apolloService.isConfigured()) {
+      apolloService.findEmail(lead.name, lead.company, lead.linkedin_url)
+        .then((email) => {
+          if (!email) return null;
+          return supabase.from('leads')
+            .update({ email, enrichment_data: { ...(lead.enrichment_data || {}), email_source: 'apollo' } })
+            .eq('id', lead.id);
+        })
+        .catch((e) => logError('connectByName apollo enrichment', e));
+    }
+
+    // search_url (not linkedin_url) drives the connect call — see
+    // sendConnectionRequest's comment for why this agent needs a search URL
+    // rather than a bare profile URL.
+    if (!candidate.search_url) {
+      return res.status(201).json({
+        lead,
+        connection: { sent: false, error: 'No search URL available for this candidate — cannot send a connection request' },
+      });
+    }
+
+    try {
+      await phantombusterService.sendConnectionRequest(candidate.search_url);
+      const { data: updated, error: updateErr } = await supabase
+        .from('leads')
+        .update({
+          linkedin_connection_status: 'requested',
+          linkedin_connection_requested_at: new Date().toISOString(),
+        })
+        .eq('id', lead.id)
+        .select()
+        .single();
+      if (updateErr) { logError('connectByName status update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+      return res.status(201).json({ lead: updated, connection: { sent: true } });
+    } catch (connectErr) {
+      logError('connectByName sendConnectionRequest', connectErr);
+      return res.status(201).json({ lead, connection: { sent: false, error: connectErr.message } });
+    }
+  } catch (err) {
+    logError('connectByName (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function draftLinkedinMessage(req, res) {
+  try {
+    const { data: lead, error } = await supabase.from('leads').select('*').eq('id', req.params.id).single();
+    if (error) { logError('draftLinkedinMessage fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+
+    const body = await claudeService.draftLinkedInOutreachMessage(lead);
+
+    const { data, error: updateErr } = await supabase
+      .from('leads')
+      .update({ linkedin_message_draft: body, linkedin_message_status: 'drafted' })
+      .eq('id', lead.id)
+      .select()
+      .single();
+    if (updateErr) { logError('draftLinkedinMessage update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+    res.json(data);
+  } catch (err) {
+    logError('draftLinkedinMessage (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function updateLinkedinMessage(req, res) {
+  try {
+    const { body } = req.body;
+    if (body === undefined) return res.status(400).json({ error: 'body is required' });
+    const { data, error } = await supabase
+      .from('leads')
+      .update({ linkedin_message_draft: body })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) { logError('updateLinkedinMessage', error); return res.status(400).json({ error: error.message }); }
+    res.json(data);
+  } catch (err) {
+    logError('updateLinkedinMessage (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// Sends directly via Phantombuster's LinkedIn Message Sender — not Lemlist.
+// LinkedIn sending on Lemlist requires their paid Multichannel tier, which the
+// account isn't on; Phantombuster already covers connect + message within the
+// existing plan, so Lemlist is only used for the email-escalation fallback.
+async function approveLinkedinMessage(req, res) {
+  try {
+    const { data: lead, error } = await supabase.from('leads').select('*').eq('id', req.params.id).single();
+    if (error) { logError('approveLinkedinMessage fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+    if (!lead.linkedin_message_draft) return res.status(400).json({ error: 'No draft to approve — generate one first' });
+    if (!lead.linkedin_url) return res.status(400).json({ error: 'Lead has no LinkedIn URL — cannot send a message' });
+
+    await phantombusterService.sendLinkedInMessage(lead.linkedin_url, lead.linkedin_message_draft);
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('leads')
+      .update({ linkedin_message_status: 'sent', linkedin_message_sent_at: new Date().toISOString() })
+      .eq('id', lead.id)
+      .select()
+      .single();
+    if (updateErr) { logError('approveLinkedinMessage update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+
+    res.json({ success: true, sent: true, lead: updated });
+  } catch (err) {
+    logError('approveLinkedinMessage (thrown)', err);
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function draftLinkedinReminder(req, res) {
+  try {
+    const { data: lead, error } = await supabase.from('leads').select('*').eq('id', req.params.id).single();
+    if (error) { logError('draftLinkedinReminder fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+
+    const body = await claudeService.draftLinkedInReminder(lead);
+
+    const { data, error: updateErr } = await supabase
+      .from('leads')
+      .update({ linkedin_reminder_draft: body })
+      .eq('id', lead.id)
+      .select()
+      .single();
+    if (updateErr) { logError('draftLinkedinReminder update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+    res.json(data);
+  } catch (err) {
+    logError('draftLinkedinReminder (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// Same PhantomBuster-direct approach as approveLinkedinMessage — see its
+// comment. Note: the reply-condition setting on the Message Sender agent
+// (e.g. "only send if I was last to message them") isn't wired in yet — its
+// argument key wasn't confirmed via agents/fetch (it only appears in the
+// saved config once explicitly changed from default in the agent's
+// "Behavior" step). Until then this relies solely on our own no-reply query
+// filter (linkedin-reminders.tsx only lists leads with no reply after 3
+// days), not on a second PhantomBuster-side check.
+async function approveLinkedinReminder(req, res) {
+  try {
+    const { data: lead, error } = await supabase.from('leads').select('*').eq('id', req.params.id).single();
+    if (error) { logError('approveLinkedinReminder fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
+    if (!lead.linkedin_url) return res.status(400).json({ error: 'Lead has no LinkedIn URL — cannot send a reminder' });
+
+    // Draft-then-approve in one click (matches the frontend's "Send reminder" button) —
+    // generate now if the frontend didn't call the draft endpoint separately first.
+    const reminderText = lead.linkedin_reminder_draft || await claudeService.draftLinkedInReminder(lead);
+
+    await phantombusterService.sendLinkedInMessage(lead.linkedin_url, reminderText);
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('leads')
+      .update({ linkedin_reminder_draft: reminderText, linkedin_reminder_sent_at: new Date().toISOString() })
+      .eq('id', lead.id)
+      .select()
+      .single();
+    if (updateErr) { logError('approveLinkedinReminder update', updateErr); return res.status(500).json({ error: updateErr.message }); }
+
+    res.json({ success: true, sent: true, lead: updated });
+  } catch (err) {
+    logError('approveLinkedinReminder (thrown)', err);
+    res.status(400).json({ error: err.message });
+  }
+}
+
+module.exports = {
+  listLeads, getLead, createLead, updateLead, deleteLead, findFounder, enrichLead, findLeadEmail, importLeads,
+  connectByName, draftLinkedinMessage, updateLinkedinMessage, approveLinkedinMessage,
+  draftLinkedinReminder, approveLinkedinReminder,
+};
