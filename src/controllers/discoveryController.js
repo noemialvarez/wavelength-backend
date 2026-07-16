@@ -355,12 +355,10 @@ async function findByName(req, res) {
     const { firstName, lastName, company, purpose } = req.body;
     if (!firstName || !lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
 
-    const { searchUrl, profiles } = await phantombusterService.searchPersonByName(firstName, lastName, company);
+    const profiles = await phantombusterService.searchPersonByName(firstName, lastName, company);
     const candidates = profiles.map(candidatePayload).filter((c) => c.name || c.linkedin_url);
 
-    // search_url is carried through to /api/leads/by-name/connect so the
-    // connect step's own search-and-act agent targets the exact same person.
-    res.json({ data: candidates.map((c) => ({ ...c, purpose, search_url: searchUrl })) });
+    res.json({ data: candidates.map((c) => ({ ...c, purpose })) });
   } catch (err) {
     logError('findByName (thrown)', err);
     res.status(500).json({ error: err.message });

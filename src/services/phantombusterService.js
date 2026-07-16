@@ -188,54 +188,36 @@ async function searchPersonByName(firstName, lastName, company) {
     numberOfResultsPerSearch: 5,
   });
 
-  // Return the search URL alongside the results so the connect step can reuse
-  // the exact same search rather than reconstructing one — the connect agent
-  // (a different phantom, different argument schema) also runs search-then-act,
-  // so re-running an equivalent query keeps the "who gets connected with"
-  // identical to what the user was shown and approved.
-  return { searchUrl, profiles: profiles.slice(0, 5) };
+  return profiles.slice(0, 5);
 }
 
 function isConnectAgentConfigured() {
   return !!process.env.PHANTOMBUSTER_CONNECT_AGENT_ID;
 }
 
-// Queues a LinkedIn connection request via Phantombuster's "LinkedIn Search to
-// Lead Connection" agent. Requires PHANTOMBUSTER_CONNECT_AGENT_ID to be set up
-// in the Phantombuster account — see README for setup notes. Throws a clear
-// error if not configured rather than silently no-op'ing, so callers surface
-// it to the user instead of hanging.
+// Sends a LinkedIn connection request via Phantombuster's "LinkedIn Auto
+// Connect" agent. Requires PHANTOMBUSTER_CONNECT_AGENT_ID to be set up in the
+// Phantombuster account — see README for setup notes. Throws a clear error if
+// not configured rather than silently no-op'ing, so callers surface it to the
+// user instead of hanging.
 //
-// This is a Phantombuster "Workflow", not a one-shot sender: this call adds
-// the profile to Phantombuster's own invite queue, but the actual send only
-// happens on the agent's separate recurring schedule (throttled to ~5/hour,
-// 20/day during working hours — LinkedIn's own anti-automation limits). The
-// agent must be configured with a recurring launch schedule in Phantombuster
-// directly for queued requests to ever actually go out; this function only
-// handles the "add to queue" half.
-//
-// Argument schema confirmed via GET /agents/fetch against a live agent
-// (Phantombuster's public docs named a different key than what's actually
-// saved): `queries` + `inputType` + `message`, not a bare profile-URL list.
-// It's fundamentally a "search then connect with the results" tool, so we
-// pass the *same* LinkedIn search URL that already surfaced this candidate
-// during the by-name search step (see searchPersonByName) rather than
-// reconstructing one — that keeps the person who gets connected-with
-// identical to the one the user saw and approved.
-async function sendConnectionRequest(searchUrl, note) {
+// Unlike "LinkedIn Search to Lead Connection" (tried first, but turned out to
+// be a paced Workflow that queues invites for a separate recurring schedule
+// rather than sending on launch — see git history), this agent takes a direct
+// profileUrl and sends within the same launch: numberOfAddsPerLaunch caps how
+// many it sends per call, set to 1 so each call handles exactly one person.
+// Argument schema confirmed via GET /agents/fetch against a live agent.
+async function sendConnectionRequest(profileUrl, note) {
   if (!isConnectAgentConfigured()) {
     throw new Error(
-      'PHANTOMBUSTER_CONNECT_AGENT_ID is not configured — set up a LinkedIn Search to Lead Connection agent in Phantombuster and add its ID to the backend env vars',
+      'PHANTOMBUSTER_CONNECT_AGENT_ID is not configured — set up a LinkedIn Auto Connect agent in Phantombuster and add its ID to the backend env vars',
     );
   }
   const agentId = process.env.PHANTOMBUSTER_CONNECT_AGENT_ID;
   const launch = await launchAgent(agentId, {
-    inputType: 'Regular LinkedIn Search',
-    queries: searchUrl,
-    // Capped to 1 so this only ever acts on the top match of the narrow
-    // "FirstName LastName Company" search built by searchPersonByName —
-    // never sends requests to other people the search might also surface.
-    numberOfResultsPerInput: 1,
+    inputType: 'profileUrl',
+    profileUrl,
+    numberOfAddsPerLaunch: 1,
     message: note || '',
     sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
   });

@@ -417,13 +417,11 @@ async function importLeads(req, res) {
 }
 
 // Creates a lead from an Option 4 ("by name") search candidate and sends a
-// Queues a LinkedIn connection request via Phantombuster's "LinkedIn Search
-// to Lead Connection" agent. This is a Workflow, not a one-shot send: it adds
-// the person to Phantombuster's own paced invite queue (throttled to ~5/hour,
-// 20/day during working hours, per LinkedIn's anti-automation limits) rather
-// than sending immediately — actual sending happens on the agent's own
-// recurring schedule, configured in Phantombuster directly. The lead is
-// always created — if queuing itself fails (e.g. agent not configured), that
+// Sends a LinkedIn connection request via Phantombuster's "LinkedIn Auto
+// Connect" agent — a genuine one-shot sender, unlike "LinkedIn Search to Lead
+// Connection" (tried first, but it queues invites for a separate paced
+// schedule instead of sending on launch). The lead is always created — if
+// the connection request itself fails (e.g. agent not configured), that
 // failure is reported alongside the lead rather than losing the lead too.
 async function connectByName(req, res) {
   try {
@@ -461,18 +459,15 @@ async function connectByName(req, res) {
         .catch((e) => logError('connectByName apollo enrichment', e));
     }
 
-    // search_url (not linkedin_url) drives the connect call — see
-    // sendConnectionRequest's comment for why this agent needs a search URL
-    // rather than a bare profile URL.
-    if (!candidate.search_url) {
+    if (!lead.linkedin_url) {
       return res.status(201).json({
         lead,
-        connection: { queued: false, error: 'No search URL available for this candidate — cannot queue a connection request' },
+        connection: { sent: false, error: 'No LinkedIn URL resolved for this candidate — cannot send a connection request' },
       });
     }
 
     try {
-      await phantombusterService.sendConnectionRequest(candidate.search_url);
+      await phantombusterService.sendConnectionRequest(lead.linkedin_url);
       const { data: updated, error: updateErr } = await supabase
         .from('leads')
         .update({
@@ -483,10 +478,10 @@ async function connectByName(req, res) {
         .select()
         .single();
       if (updateErr) { logError('connectByName status update', updateErr); return res.status(500).json({ error: updateErr.message }); }
-      return res.status(201).json({ lead: updated, connection: { queued: true } });
+      return res.status(201).json({ lead: updated, connection: { sent: true } });
     } catch (connectErr) {
       logError('connectByName sendConnectionRequest', connectErr);
-      return res.status(201).json({ lead, connection: { queued: false, error: connectErr.message } });
+      return res.status(201).json({ lead, connection: { sent: false, error: connectErr.message } });
     }
   } catch (err) {
     logError('connectByName (thrown)', err);
