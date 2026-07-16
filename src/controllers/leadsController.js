@@ -12,7 +12,7 @@ async function listLeads(req, res) {
   try {
     const {
       status, source, search, page = 1, limit = 50,
-      linkedin_message_status, no_reply_days, stage,
+      linkedin_message_status, no_reply_days, stage, linkedin_connection_status,
     } = req.query;
     const offset = (page - 1) * limit;
 
@@ -25,6 +25,7 @@ async function listLeads(req, res) {
     if (status) query = query.eq('status', status);
     if (source) query = query.eq('source', source);
     if (search) query = query.ilike('name', `%${search}%`);
+    if (linkedin_connection_status) query = query.eq('linkedin_connection_status', linkedin_connection_status);
 
     // "No reply after N days" — LinkedIn message sent, no reply yet, no reminder sent yet.
     if (linkedin_message_status === 'sent' && no_reply_days) {
