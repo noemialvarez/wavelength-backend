@@ -446,19 +446,10 @@ async function connectByName(req, res) {
     const { data: lead, error } = await supabase.from('leads').insert(payload).select().single();
     if (error) { logError('connectByName insert', error); return res.status(400).json({ error: error.message }); }
 
-    // Best-effort Apollo email lookup now (not blocking), so the lead already
-    // has an email by the time it reaches "approve & push to Lemlist" later —
-    // Lemlist requires an email even to push a LinkedIn-step message.
-    if (apolloService.isConfigured()) {
-      apolloService.findEmail(lead.name, lead.company, lead.linkedin_url)
-        .then((email) => {
-          if (!email) return null;
-          return supabase.from('leads')
-            .update({ email, enrichment_data: { ...(lead.enrichment_data || {}), email_source: 'apollo' } })
-            .eq('id', lead.id);
-        })
-        .catch((e) => logError('connectByName apollo enrichment', e));
-    }
+    // No automatic Apollo lookup here — by-name leads are pursued via
+    // LinkedIn first, and an email lookup costs Apollo credits per call.
+    // Email is only looked up on demand, via the email-escalation step's own
+    // "Find email" action, once LinkedIn outreach has gone nowhere.
 
     if (!lead.linkedin_url) {
       return res.status(201).json({
