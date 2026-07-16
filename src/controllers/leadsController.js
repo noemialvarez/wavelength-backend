@@ -417,8 +417,13 @@ async function importLeads(req, res) {
 }
 
 // Creates a lead from an Option 4 ("by name") search candidate and sends a
-// LinkedIn connection request via Phantombuster. The lead is always created —
-// if the connection request itself fails (e.g. agent not configured), that
+// Queues a LinkedIn connection request via Phantombuster's "LinkedIn Search
+// to Lead Connection" agent. This is a Workflow, not a one-shot send: it adds
+// the person to Phantombuster's own paced invite queue (throttled to ~5/hour,
+// 20/day during working hours, per LinkedIn's anti-automation limits) rather
+// than sending immediately — actual sending happens on the agent's own
+// recurring schedule, configured in Phantombuster directly. The lead is
+// always created — if queuing itself fails (e.g. agent not configured), that
 // failure is reported alongside the lead rather than losing the lead too.
 async function connectByName(req, res) {
   try {
@@ -462,7 +467,7 @@ async function connectByName(req, res) {
     if (!candidate.search_url) {
       return res.status(201).json({
         lead,
-        connection: { sent: false, error: 'No search URL available for this candidate — cannot send a connection request' },
+        connection: { queued: false, error: 'No search URL available for this candidate — cannot queue a connection request' },
       });
     }
 
@@ -478,10 +483,10 @@ async function connectByName(req, res) {
         .select()
         .single();
       if (updateErr) { logError('connectByName status update', updateErr); return res.status(500).json({ error: updateErr.message }); }
-      return res.status(201).json({ lead: updated, connection: { sent: true } });
+      return res.status(201).json({ lead: updated, connection: { queued: true } });
     } catch (connectErr) {
       logError('connectByName sendConnectionRequest', connectErr);
-      return res.status(201).json({ lead, connection: { sent: false, error: connectErr.message } });
+      return res.status(201).json({ lead, connection: { queued: false, error: connectErr.message } });
     }
   } catch (err) {
     logError('connectByName (thrown)', err);

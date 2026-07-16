@@ -200,11 +200,19 @@ function isConnectAgentConfigured() {
   return !!process.env.PHANTOMBUSTER_CONNECT_AGENT_ID;
 }
 
-// Sends a LinkedIn connection request via Phantombuster's "LinkedIn Search to
+// Queues a LinkedIn connection request via Phantombuster's "LinkedIn Search to
 // Lead Connection" agent. Requires PHANTOMBUSTER_CONNECT_AGENT_ID to be set up
 // in the Phantombuster account — see README for setup notes. Throws a clear
 // error if not configured rather than silently no-op'ing, so callers surface
 // it to the user instead of hanging.
+//
+// This is a Phantombuster "Workflow", not a one-shot sender: this call adds
+// the profile to Phantombuster's own invite queue, but the actual send only
+// happens on the agent's separate recurring schedule (throttled to ~5/hour,
+// 20/day during working hours — LinkedIn's own anti-automation limits). The
+// agent must be configured with a recurring launch schedule in Phantombuster
+// directly for queued requests to ever actually go out; this function only
+// handles the "add to queue" half.
 //
 // Argument schema confirmed via GET /agents/fetch against a live agent
 // (Phantombuster's public docs named a different key than what's actually
