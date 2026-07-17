@@ -352,8 +352,21 @@ function candidatePayload(profile) {
 
 async function findByName(req, res) {
   try {
-    const { firstName, lastName, company, purpose } = req.body;
+    const { firstName, lastName, company, linkedinProfileUrl, purpose } = req.body;
     if (!firstName || !lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
+
+    // If the caller already knows the exact LinkedIn profile, skip the
+    // fuzzy name search entirely and treat it as a confirmed match.
+    if (linkedinProfileUrl) {
+      return res.json({
+        data: [{
+          name: `${firstName} ${lastName}`,
+          linkedin_url: linkedinProfileUrl,
+          company: company || null,
+          purpose,
+        }],
+      });
+    }
 
     const profiles = await phantombusterService.searchPersonByName(firstName, lastName, company);
     const candidates = profiles.map(candidatePayload).filter((c) => c.name || c.linkedin_url);
