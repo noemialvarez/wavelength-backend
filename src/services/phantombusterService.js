@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { normalizeProfileUrl } = require('../utils/linkedinUrl');
 
 const pb = axios.create({
   baseURL: 'https://api.phantombuster.com/api/v2',
@@ -236,11 +237,11 @@ function isConnectionsCheckAgentConfigured() {
 // found nothing". Argument schema confirmed via agents/fetch: numberOfProfiles
 // + sortBy + sessionCookie. Sorted newest-first, capped at 100 — comfortably
 // covers new acceptances between polling runs (see cronService).
-async function fetchAcceptedConnections() {
+async function fetchAcceptedConnections(limit = 100) {
   if (!isConnectionsCheckAgentConfigured()) return null;
   const agentId = process.env.PHANTOMBUSTER_CONNECTIONS_AGENT_ID;
   const launch = await launchAgent(agentId, {
-    numberOfProfiles: 100,
+    numberOfProfiles: limit,
     sortBy: 'Recently added',
     sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
   });
@@ -320,6 +321,140 @@ async function postLinkedInComment(postUrl, commentText) {
   return waitForAgent(agentId, launch.containerId);
 }
 
+// ---------------------------------------------------------------------------
+// Team lookup, connection check and post fetching (LinkedIn Engagement flow)
+// ---------------------------------------------------------------------------
+
+const CONNECTIONS_TTL_MS = 6 * 60 * 60 * 1000;
+let connectionCache = { set: null, ts: 0 };
+let connectionInFlight = null;
+
+// Set of normalised profile URLs the LinkedIn account is connected to, from a full
+// Connections Export (cached for 6h — the export is slow and rate-limited).
+// Returns null when the agent isn't configured or the export came back empty, so
+// callers can report "unknown" instead of wrongly reporting "not connected".
+async function getConnectionSet({ force = false } = {}) {
+  if (!isConnectionsCheckAgentConfigured()) return null;
+  if (!force && connectionCache.set && Date.now() - connectionCache.ts < CONNECTIONS_TTL_MS) {
+    return connectionCache.set;
+  }
+  if (connectionInFlight) return connectionInFlight;
+
+  connectionInFlight = (async () => {
+    const limit = Number(process.env.PHANTOMBUSTER_CONNECTIONS_EXPORT_LIMIT) || 2000;
+    const profiles = await fetchAcceptedConnections(limit);
+    const set = new Set(
+      (profiles || [])
+        .map((c) => normalizeProfileUrl(c.profileUrl || c.linkedinUrl || c.url))
+        .filter(Boolean),
+    );
+    if (set.size === 0) return null;
+    connectionCache = { set, ts: Date.now() };
+    return set;
+  })().finally(() => {
+    connectionInFlight = null;
+  });
+  return connectionInFlight;
+}
+
+const LEADERSHIP_RE = /founder|\bceo\b|\bcto\b|\bcoo\b|\bcfo\b|\bcmo\b|\bcpo\b|\bcro\b|\bcio\b|chief|managing director|\bpresident\b|head of|\bvp\b|vice president|\bowner\b/i;
+const NOT_CURRENT_RE = /\b(former|formerly|ex[- ]|advisor|adviser|investor|board member)\b/i;
+
+function alnum(str) {
+  return String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function profileFields(r) {
+  const nameParts = [r.firstName, r.lastName].filter(Boolean);
+  return {
+    name: r.fullName || r.name || (nameParts.length ? nameParts.join(' ') : null),
+    role: r.title || r.occupation || r.currentJob || r.jobTitle || r.headline || r.job || null,
+    linkedin_url: r.profileUrl || r.linkedinUrl || r.url || null,
+    company: r.company || r.companyName || r.currentCompany || null,
+  };
+}
+
+// Keeps only current founders / executives of the company from raw search results.
+function pickTeam(profiles, companyName) {
+  const wanted = alnum(companyName);
+  const seen = new Set();
+  const people = [];
+  for (const raw of profiles) {
+    const p = profileFields(raw);
+    if (!p.name || !p.linkedin_url || !p.role) continue;
+    if (!LEADERSHIP_RE.test(p.role) || NOT_CURRENT_RE.test(p.role)) continue;
+    if (!alnum(`${p.role} ${p.company || ''}`).includes(wanted)) continue;
+    const key = normalizeProfileUrl(p.linkedin_url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    people.push({
+      name: p.name,
+      role: p.role,
+      linkedin_url: p.linkedin_url,
+      is_founder: /founder|\bowner\b/i.test(p.role),
+    });
+  }
+  return people;
+}
+
+// Searches LinkedIn for people at a company with a founder / C-level / VP / head-of
+// title, using ONE search-export launch, then keeps only results whose headline
+// mentions the company and isn't a former/advisory role — a wrong person here would
+// later get a connection request.
+async function searchTeam(companyName) {
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+  const roles =
+    'founder OR cofounder OR "co-founder" OR CEO OR CTO OR COO OR CFO OR CMO OR chief OR "managing director" OR president OR "head of" OR VP OR "vice president"';
+  const keywords = `"${companyName}" AND (${roles})`;
+  const searchUrl =
+    `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}&origin=GLOBAL_SEARCH_HEADER`;
+  console.log('[phantombuster] team search url:', searchUrl);
+
+  const profiles = await runSearchAgent(agentId, `team::${companyName.toLowerCase()}`, {
+    search: searchUrl,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    numberOfResultsPerSearch: 25,
+  });
+
+  return pickTeam(profiles, companyName);
+}
+
+// Finds a company's LinkedIn page URL through the same search-export agent.
+// Returns null when nothing usable comes back (e.g. the agent only supports people search).
+async function searchCompanyPage(companyName) {
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
+  const searchUrl =
+    `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
+  const profiles = await runSearchAgent(agentId, `company-page::${companyName.toLowerCase()}`, {
+    search: searchUrl,
+    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    numberOfResultsPerSearch: 5,
+  });
+  const wanted = alnum(companyName);
+  const pages = profiles
+    .map((r) => ({
+      name: r.companyName || r.name || r.fullName || '',
+      url: r.companyUrl || r.profileUrl || r.linkedinUrl || r.url || '',
+    }))
+    .filter((c) => /linkedin\.com\/company\//i.test(c.url));
+  const best = pages.find((c) => alnum(c.name).includes(wanted)) || pages[0];
+  return best ? best.url : null;
+}
+
+// Recent posts for a single profile / company page via the LinkedIn Activity agent.
+async function fetchPostsFor(url) {
+  const activities = await fetchLinkedInActivity([url]);
+  return activities
+    .map((a) => ({
+      text: a.text || a.content || '',
+      post_url: a.postUrl || a.url || null,
+      date: a.date || null,
+      type: a.type || 'post',
+    }))
+    .filter((a) => a.text)
+    .slice(0, 5);
+}
+
 module.exports = {
   getAgentOutput,
   launchFounderSearch,
@@ -328,6 +463,11 @@ module.exports = {
   sendConnectionRequest,
   isConnectionsCheckAgentConfigured,
   fetchAcceptedConnections,
+  getConnectionSet,
+  searchTeam,
+  pickTeam,
+  searchCompanyPage,
+  fetchPostsFor,
   isMessageAgentConfigured,
   sendLinkedInMessage,
   enrichFounder,

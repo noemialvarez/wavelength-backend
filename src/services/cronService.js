@@ -2,16 +2,9 @@ const cron = require('node-cron');
 const supabase = require('../config/supabase');
 const phantombusterService = require('./phantombusterService');
 const logError = require('../utils/logError');
+const { normalizeProfileUrl } = require('../utils/linkedinUrl');
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-
-// Normalises a Phantombuster connections-export profile URL for comparison —
-// strips protocol/trailing slash/query string so minor formatting differences
-// (http vs https, trailing slash) don't cause false negatives.
-function normalizeProfileUrl(url) {
-  if (!url) return '';
-  return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '').split('?')[0].toLowerCase();
-}
 
 // Job A: for leads with a pending connection request, check whether the
 // connection has been accepted yet via Phantombuster's connections export.

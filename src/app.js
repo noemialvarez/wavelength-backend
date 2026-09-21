@@ -6,6 +6,7 @@ const discoveryRouter = require('./routes/discovery');
 const outreachRouter = require('./routes/outreach');
 const engagementRouter = require('./routes/engagement');
 const sequencesRouter = require('./routes/sequences');
+const contactsRouter = require('./routes/contacts');
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use('/api/discovery', discoveryRouter);
 app.use('/api/outreach', outreachRouter);
 app.use('/api/engagement', engagementRouter);
 app.use('/api/sequences', sequencesRouter);
+app.use('/api/contacts', contactsRouter);
 
 app.use((err, req, res, _next) => {
   console.error(`\n[UNHANDLED ERROR] ${req.method} ${req.originalUrl}`);

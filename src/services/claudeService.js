@@ -147,6 +147,60 @@ Return only the comment text, nothing else.`,
   return message.content[0].text.trim();
 }
 
+// Short summary of what a person or company page has been posting about.
+async function summarizeLinkedInPosts(name, posts) {
+  const list = posts.map((p, i) => `${i + 1}. ${p.text.slice(0, 600)}`).join('\n\n');
+  const message = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 200,
+    messages: [
+      {
+        role: 'user',
+        content: `Here are recent LinkedIn posts by ${name}:
+
+${list}
+
+Summarise in at most 2 short sentences what ${name} posts about (topics and themes, not a post-by-post recap). Plain text only.`,
+      },
+    ],
+  });
+  return message.content[0].text.trim();
+}
+
+// Three different short comment options for one post; the user picks and edits one.
+async function draftLinkedInCommentOptions(name, post) {
+  const message = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 500,
+    messages: [
+      {
+        role: 'user',
+        content: `Draft 3 different short LinkedIn comments for this post by ${name}.
+
+POST:
+${post.text.slice(0, 1500)}
+
+Rules for each comment:
+- Max 2 sentences
+- Sound human, not AI-generated
+- Add a specific observation or question
+- No hashtags or emojis
+- The 3 options should take different angles
+
+Respond with ONLY a JSON array of 3 strings.`,
+      },
+    ],
+  });
+  const raw = message.content[0].text.trim();
+  const match = raw.match(/\[[\s\S]*\]/);
+  if (!match) return [];
+  try {
+    return JSON.parse(match[0]).filter((c) => typeof c === 'string' && c.trim()).slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
 async function findCompaniesByDescription({ description, industry, geography, audience, companySize }) {
   const message = await client.messages.create({
     model: 'claude-opus-4-8',
@@ -192,5 +246,7 @@ module.exports = {
   draftLinkedInOutreachMessage,
   draftLinkedInReminder,
   draftLinkedInComment,
+  summarizeLinkedInPosts,
+  draftLinkedInCommentOptions,
   findCompaniesByDescription,
 };
