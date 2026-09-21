@@ -48,11 +48,13 @@ Source: ${sourceLabel}
 Page content:
 ${truncated}
 
-Return a JSON array of objects with fields: company_name, signal_description, signal_type, source_url.
+Return a JSON array of objects with fields: company_name, signal_description, signal_type, source_url, country, company_description.
 - company_name: the startup name
 - signal_description: one sentence describing the signal (e.g. "Raised CHF 4M seed round led by Redalpine")
 - signal_type: one of "Funding", "Key hire", "Product launch", "Other"
 - source_url: the article or announcement URL if visible, otherwise null
+- country: the country where the startup is based (e.g. "Switzerland"), only if the text states or clearly implies it, otherwise null. Do not guess.
+- company_description: a brief phrase (max ~15 words) describing what the startup does, e.g. "AI-powered defense technology for autonomous systems". Use only what the text says or clearly implies, otherwise null.
 
 Respond with ONLY a valid JSON array — no markdown, no explanation.
 If none found return: []`,
@@ -76,6 +78,8 @@ function toSignals(extracted, fallbackUrl) {
     company_name: e.company_name,
     signal_description: e.signal_description,
     signal_type: e.signal_type,
+    country: e.country || null,
+    company_description: e.company_description || null,
     signal_url: e.source_url || fallbackUrl,
     founder_name: null,
     founder_email: null,

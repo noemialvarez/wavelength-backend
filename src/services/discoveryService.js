@@ -15,13 +15,13 @@ async function runDiscovery(runId, sources) {
     try {
       const results = await scanner.runAdapter(source);
       console.log(`[discovery] run=${runId} source=${source} — extracted ${results.length} companies`);
-      signals.push(...results.map(({ company_name, signal_description, signal_type, signal_url, founder_name, founder_email, linkedin_url }) => ({
+      signals.push(...results.map(({ company_name, signal_description, signal_type, country, company_description, signal_url, founder_name, founder_email, linkedin_url }) => ({
         company_name,
         signal_url,
         founder_name,
         founder_email,
         linkedin_url,
-        raw_data: { signal_description, signal_type },
+        raw_data: { signal_description, signal_type, country, company_description },
         source,
         run_id: runId,
         status: 'new',
