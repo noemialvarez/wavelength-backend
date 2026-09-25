@@ -42,3 +42,7 @@ create unique index if not exists lead_contacts_one_company_idx
   on lead_contacts(lead_id) where kind = 'company';
 
 alter table lead_contacts enable row level security;
+
+-- The backend connects with the service role, which needs explicit access to a
+-- table created from the SQL editor.
+grant all on table public.lead_contacts to service_role;

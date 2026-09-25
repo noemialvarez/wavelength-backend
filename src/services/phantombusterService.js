@@ -19,7 +19,7 @@ const PARALLELISM_RETRY_WAIT_MS = 15 * 1000;
 
 async function launchAgent(agentId, args = {}) {
   const body = { id: agentId, argument: JSON.stringify(args) };
-  console.log('[phantombuster] request body:', JSON.stringify(body));
+  console.log('[phantombuster] request body:', JSON.stringify(body).replace(/("sessionCookie\\?":\\?")[^"\\]*/g, '$1[redacted]'));
 
   const attempt = async () => {
     try {
@@ -101,6 +101,12 @@ async function fetchS3Results(outputText) {
   var match = (outputText || '').match(/JSON saved at (https:\/\/phantombuster\.s3\.amazonaws\.com\/[^\s\r\n]+\.json)/);
   if (!match) {
     console.log('[phantombuster] no S3 URL found in output text');
+    // A Phantom that "finishes" with a session/login/error message produced no results
+    // because it failed. Surface that instead of reporting an empty (successful) search.
+    if (/cookie|session|log ?in|not logged|error|fail|limit|quota|execution time/i.test(outputText || '')) {
+      const tail = String(outputText).trim().split('\n').slice(-3).join(' | ').slice(0, 300);
+      throw new Error(`Phantombuster finished without results: ${tail}`);
+    }
     return [];
   }
   var s3Url = match[1];
@@ -142,7 +148,7 @@ async function runSearchAgent(agentId, cacheKey, launchArgs) {
     const launch = await launchAgent(agentId, launchArgs);
     const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
     const profiles = await fetchS3Results(agentOutput.output);
-    resultCache.set(cacheKey, { result: profiles, ts: Date.now() });
+    if (profiles.length > 0) resultCache.set(cacheKey, { result: profiles, ts: Date.now() });
     return profiles;
   })().finally(() => {
     agentInFlight.delete(agentId);
