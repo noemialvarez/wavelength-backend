@@ -317,11 +317,16 @@ async function fetchLinkedInActivity(profileUrls) {
   return activities;
 }
 
-async function postLinkedInComment(postUrl, commentText) {
+// The Auto Commenter reads its post URL(s) and comment(s) from a spreadsheet (Google
+// Sheet or public CSV) — confirmed in its own setup UI ("Your post URLs and comments" /
+// "Give your list of LinkedIn post URLs and comments in separate columns in a
+// spreadsheet"), unlike the other agents which take direct fields. `csvUrl` is our own
+// backend's one-row CSV (see contactsController's commentCsv) generated fresh per call,
+// so there's no need for an actual Google Sheet.
+async function postLinkedInComment(csvUrl) {
   const agentId = process.env.PHANTOMBUSTER_COMMENT_AGENT_ID;
   const launch = await launchAgent(agentId, {
-    postUrl,
-    comment: commentText,
+    spreadsheetUrl: csvUrl,
     sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
   });
   return waitForAgent(agentId, launch.containerId);

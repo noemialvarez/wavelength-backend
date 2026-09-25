@@ -3,6 +3,9 @@ const contactsController = require('../controllers/contactsController');
 
 router.get('/', contactsController.listContacts);
 
+// Public one-row CSV for the Auto Commenter Phantom to fetch — see contactsController.
+router.get('/comment.csv', contactsController.commentCsv);
+
 // Founders + executive team of a lead's company, with LinkedIn connection status
 router.post('/find-team', contactsController.findTeam);
 router.post('/check-connections', contactsController.checkConnections);

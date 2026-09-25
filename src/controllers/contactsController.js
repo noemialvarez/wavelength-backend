@@ -293,6 +293,26 @@ async function draftComments(req, res) {
   }
 }
 
+// The domain the Auto Commenter's spreadsheet URL is served from — same Railway service
+// as the app itself. Overridable via env in case the backend ever moves.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://wavelength-production-6609.up.railway.app';
+
+function csvField(value) {
+  // Always quote, doubling any internal quotes — simplest way to survive commas/quotes
+  // in a post URL or comment text without needing to special-case them.
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+// Serves a one-row, no-header CSV (post URL in column A, comment in column B) built from
+// the query string. Public and unauthenticated on purpose — the Auto Commenter Phantom
+// fetches it directly, has no way to send our app's credentials, and the content is only
+// a public LinkedIn post URL plus a comment that's about to be posted publicly anyway.
+async function commentCsv(req, res) {
+  const { url, comment } = req.query;
+  if (!url || !comment) return res.status(400).send('url and comment query params are required');
+  res.type('text/csv').send(`${csvField(url)},${csvField(comment)}\n`);
+}
+
 // Posts the user's final comment on LinkedIn. Only ever called from an explicit "Post comment" click.
 async function postComment(req, res) {
   try {
@@ -300,11 +320,13 @@ async function postComment(req, res) {
     if (!post_url || !body || !String(body).trim()) {
       return res.status(400).json({ error: 'post_url and a non-empty body are required' });
     }
-    await phantombusterService.postLinkedInComment(post_url, String(body).trim());
+    const text = String(body).trim();
+    const csvUrl = `${PUBLIC_BASE_URL}/api/contacts/comment.csv?url=${encodeURIComponent(post_url)}&comment=${encodeURIComponent(text)}`;
+    await phantombusterService.postLinkedInComment(csvUrl);
 
     const { data, error } = await supabase
       .from('lead_contacts')
-      .update({ last_comment: String(body).trim(), commented_at: new Date().toISOString(), comment_suggestions: null })
+      .update({ last_comment: text, commented_at: new Date().toISOString(), comment_suggestions: null })
       .eq('id', req.params.id)
       .select()
       .single();
@@ -319,5 +341,5 @@ async function postComment(req, res) {
 module.exports = {
   listContacts, findTeam, checkConnections,
   selectContact, deselectContact,
-  refreshPosts, draftComments, postComment,
+  refreshPosts, draftComments, postComment, commentCsv,
 };
