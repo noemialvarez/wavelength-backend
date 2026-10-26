@@ -231,9 +231,26 @@ async function findLeaders(filters, trail) {
     const byTitle = everyone.people.filter((p) => LEADERSHIP_TITLE_RE.test(p.title || ''));
     step.listed = everyone.total;
     step.leaders_by_title = byTitle.length;
+    // The titles Apollo has for them (no names), so "lists N people, none senior" can be explained.
+    step.titles = everyone.people.slice(0, 10).map((p) => String(p.title || '(no title)').slice(0, 50));
     if (byTitle.length) return { people: byTitle, total: byTitle.length };
   }
   return { people: [], total: 0 };
+}
+
+// Last resort: Apollo sometimes files a company's founders under a different record (or none), so
+// the company's own record lists nobody senior. Search leaders across Apollo by the company name
+// and keep only those whose employer is that company, which the result states. Free.
+async function findLeadersByName(name, trail) {
+  const step = { by: 'name search' };
+  trail.push(step);
+  const res = await searchPeople([['q_keywords', name]], { seniorities: LEADER_SENIORITIES, perPage: 100 });
+  const wanted = alnum(name);
+  const atCompany = res.people.filter((p) => alnum(searchableCompanyName(p.organization?.name)) === wanted);
+  step.returned = res.people.length;
+  step.at_company = atCompany.length;
+  step.employers = [...new Set(res.people.map((p) => p.organization?.name).filter(Boolean))].slice(0, 6);
+  return { people: atCompany, total: atCompany.length };
 }
 
 function organizationFilters(org) {
@@ -300,7 +317,13 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
       stats.tried.push({ org: candidate.name, domain: candidate.primary_domain || null, steps: trail });
       if (attempt.people.length) { org = candidate; found = attempt; break; }
     }
-    if (!org) org = matches[0]; // nobody listed anywhere, but the company's LinkedIn page is still worth keeping
+    if (!org) {
+      org = matches[0]; // the company's own record lists nobody senior; its LinkedIn page is still worth keeping
+      const trail = [];
+      const byName = await findLeadersByName(name, trail);
+      stats.tried.push({ org: 'search by company name', domain: null, steps: trail });
+      if (byName.people.length) found = byName;
+    }
     stats.org_name = org.name;
   }
   stats.raw = found.total;
