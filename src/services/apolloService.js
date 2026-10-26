@@ -301,6 +301,7 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
   if (domain) {
     stats.org_found = true;
     stats.org_name = domain;
+    stats.org_domain = domain;
     const trail = [];
     found = await findLeaders([{ by: 'website', entries: [['q_organization_domains_list', [domain]]] }], trail);
     stats.tried.push({ org: domain, domain, steps: trail });
@@ -311,6 +312,7 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
     stats.org_candidates = orgs.slice(0, 5).map((o) => o.name);
     if (!matches.length) return { people: [], org: null, stats };
     stats.org_found = true;
+    stats.org_matches = matches.length; // more than one means several Apollo companies share this name
     for (const candidate of matches) {
       const trail = [];
       const attempt = await findLeaders(organizationFilters(candidate), trail);
@@ -325,6 +327,7 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
       if (byName.people.length) found = byName;
     }
     stats.org_name = org.name;
+    stats.org_domain = org.primary_domain || null; // which company record the people came from
   }
   stats.raw = found.total;
   // A couple of spare candidates, so a lookup that returns nothing doesn't use up a slot; the cost

@@ -10,6 +10,9 @@ router.get('/comment.csv', contactsController.commentCsv);
 router.post('/find-team', contactsController.findTeam);
 router.post('/check-connections', contactsController.checkConnections);
 
+// Add a person to a lead by pasting their LinkedIn profile link (for companies Apollo has no data on)
+router.post('/add', contactsController.addPerson);
+
 // "Select" a person — sends a LinkedIn connection request
 router.post('/:id/select', contactsController.selectContact);
 router.post('/:id/deselect', contactsController.deselectContact);

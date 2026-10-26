@@ -3,7 +3,7 @@ const phantombusterService = require('../services/phantombusterService');
 const apolloService = require('../services/apolloService');
 const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
-const { normalizeProfileUrl, isMemberIdUrl } = require('../utils/linkedinUrl');
+const { normalizeProfileUrl, isMemberIdUrl, canonicalProfileUrl, nameFromSlug } = require('../utils/linkedinUrl');
 const { friendlyPhantomError } = require('../utils/phantomError');
 
 // Sends the failure to the client as { error, code } with a plain-language message.
@@ -214,6 +214,57 @@ async function findTeam(req, res) {
     });
   } catch (err) {
     sendPhantomError(res, 'findTeam (thrown)', err);
+  }
+}
+
+// Adds a person to a lead from a pasted LinkedIn profile link, for companies the automatic
+// lookup has no data on. From here it behaves exactly like a found person: Connection check,
+// Select (connection request), LinkedIn Engagement.
+async function addPerson(req, res) {
+  try {
+    const { lead_id, linkedin_url, name, role } = req.body || {};
+    if (!lead_id) return res.status(400).json({ error: 'lead_id is required' });
+
+    const parsed = canonicalProfileUrl(linkedin_url);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    const personName = String(name || '').trim() || nameFromSlug(parsed.slug);
+    if (!personName) return res.status(400).json({ error: "Add the person's name." });
+
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .select('id, company, name, role, linkedin_url')
+      .eq('id', lead_id)
+      .single();
+    if (error) { logError('addPerson fetch lead', error); return res.status(404).json({ error: 'Lead not found' }); }
+
+    const roleText = String(role || '').trim() || null;
+    const row = {
+      lead_id: lead.id, kind: 'person', name: personName, role: roleText,
+      linkedin_url: parsed.url, is_founder: /founder|\bowner\b/i.test(roleText || ''),
+    };
+    const { error: upsertErr } = await supabase.from('lead_contacts').upsert(row, { onConflict: 'lead_id,linkedin_url' });
+    if (upsertErr) { logError('addPerson upsert', upsertErr); return res.status(500).json({ error: upsertErr.message }); }
+
+    const { data: saved, error: readErr } = await supabase
+      .from('lead_contacts')
+      .select('*')
+      .eq('lead_id', lead.id)
+      .eq('linkedin_url', parsed.url)
+      .single();
+    if (readErr) { logError('addPerson read', readErr); return res.status(500).json({ error: readErr.message }); }
+
+    // If the connections list is already loaded, show Yes/No now; otherwise it stays Unknown until "Refresh connections".
+    const { contacts } = await applyConnections([saved], { cachedOnly: true });
+
+    // The lead's own contact feeds Email Outreach and the older LinkedIn message funnel; fill it only when empty.
+    if (!lead.linkedin_url) {
+      await supabase.from('leads').update({ name: personName, role: roleText, linkedin_url: parsed.url }).eq('id', lead.id);
+    }
+
+    res.status(201).json({ contact: contacts[0] });
+  } catch (err) {
+    logError('addPerson (thrown)', err);
+    res.status(500).json({ error: err.message });
   }
 }
 
@@ -441,7 +492,7 @@ async function postComment(req, res) {
 }
 
 module.exports = {
-  listContacts, findTeam, checkConnections,
+  listContacts, findTeam, addPerson, checkConnections,
   selectContact, deselectContact,
   refreshPosts, draftComments, postComment, commentCsv,
 };
