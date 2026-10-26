@@ -12,6 +12,9 @@ const resultCache = new Map();
 const agentInFlight = new Map();
 // Per-agent last-launch timestamp: agentId -> ms
 const agentLastLaunch = new Map();
+// Per-agent tail of the Phantom's last console output, so an empty search can say what the
+// Phantom reported instead of just "0 results".
+const lastRunOutput = new Map();
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MIN_LAUNCH_INTERVAL_MS = 30 * 1000;
@@ -21,6 +24,32 @@ const PARALLELISM_RETRY_WAIT_MS = 15 * 1000;
 // that created it, so PhantomBuster's own guidance is to supply the cookie together with that
 // browser's user agent. The user agent is optional here: set PHANTOMBUSTER_LINKEDIN_USER_AGENT
 // (copied from the same browser as the li_at cookie) and it's sent along with the cookie.
+// The Search Export Phantom remembers every search it has run and, for a repeat, finishes
+// with "We've already retrieved all results from that search" and returns nothing. Adding a
+// throwaway parameter makes each launch a new search to it (LinkedIn ignores unknown
+// parameters), so retries and refreshes actually run.
+function withRunId(launchArgs) {
+  if (typeof launchArgs.search !== 'string' || !/^https?:\/\//i.test(launchArgs.search)) return launchArgs;
+  const sep = launchArgs.search.includes('?') ? '&' : '?';
+  return { ...launchArgs, search: `${launchArgs.search}${sep}wlRun=${Date.now().toString(36)}` };
+}
+
+// What the Phantom itself reported, reduced to the lines that matter: its error / warning
+// lines if it printed any (e.g. "No results found"), otherwise the last few lines. The
+// Node/AWS SDK notice every run starts with is noise.
+function summarizePhantomOutput(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/AWS SDK|maintenance mode|^\(node:|end-of-support|migrate your code|^For more information|node --trace-warnings/i.test(l));
+  const flagged = lines.filter((l) => /^\[(error|warn_)\]/i.test(l));
+  const chosen = (flagged.length ? flagged : lines).slice(-3);
+  return chosen
+    .map((l) => l.replace(/^\[[a-z_]+\]\s*/i, ''))
+    .join(' | ')
+    .slice(0, 400);
+}
+
 function linkedinAuth() {
   const auth = { sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION };
   const userAgent = (process.env.PHANTOMBUSTER_LINKEDIN_USER_AGENT || '').trim();
@@ -109,7 +138,10 @@ function pickProfile(results, searchTitle) {
 
 async function fetchS3Results(outputText) {
   console.log('[phantombuster] agent output text:', outputText);
-  var match = (outputText || '').match(/JSON saved at (https:\/\/phantombuster\.s3\.amazonaws\.com\/[^\s\r\n]+\.json)/);
+  // The results file link in the Phantom's console output. Matches any PhantomBuster-hosted
+  // .json (the original S3 bucket, or a newer cache host) rather than one exact address, and
+  // nothing outside PhantomBuster's domains, since this URL is fetched by the server.
+  var match = (outputText || '').match(/(https?:\/\/[^\s\r\n]*phantombuster[^\s\r\n]*\.json)/i);
   if (!match) {
     console.log('[phantombuster] no S3 URL found in output text');
     // A Phantom that "finishes" with a session/login/error message produced no results
@@ -156,8 +188,9 @@ async function runSearchAgent(agentId, cacheKey, launchArgs) {
 
   const runPromise = (async () => {
     agentLastLaunch.set(agentId, Date.now());
-    const launch = await launchAgent(agentId, launchArgs);
+    const launch = await launchAgent(agentId, withRunId(launchArgs));
     const agentOutput = await waitForAgent(agentId, launch.containerId, 5000, 180000);
+    lastRunOutput.set(agentId, String(agentOutput.output || ''));
     const profiles = await fetchS3Results(agentOutput.output);
     if (profiles.length > 0) resultCache.set(cacheKey, { result: profiles, ts: Date.now() });
     return profiles;
@@ -400,7 +433,9 @@ const LEGAL_SUFFIX_RE = /[\s,.]+(ag|gmbh|sa|sarl|sàrl|ltd|limited|inc|llc|plc|b
 // "GmbH", "Inc") usually aren't written in people's headlines — both made searches miss.
 function searchableCompanyName(name) {
   let s = String(name || '').trim();
-  if (/^(https?:\/\/|www\.)/i.test(s) || (/^[a-z0-9-]+(\.[a-z0-9-]+)+(\/.*)?$/i.test(s) && !/\s/.test(s))) {
+  // Only treat it as a web address when it clearly is one (scheme or "www."); a bare
+  // "Create.xyz" is a company name that happens to look like a domain.
+  if (/^(https?:\/\/|www\.)/i.test(s)) {
     try {
       const host = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`).hostname.replace(/^www\./i, '');
       const parts = host.split('.');
@@ -436,6 +471,34 @@ function connectionFromDegree(r) {
   return undefined;
 }
 
+// Every string anywhere in a raw search result (the Phantom's field names aren't guaranteed,
+// so don't depend on which field a given line arrives in).
+function stringValues(value, depth = 0) {
+  if (typeof value === 'string') return [value];
+  if (!value || typeof value !== 'object' || depth > 2) return [];
+  return Object.values(value).flatMap((v) => stringValues(v, depth + 1));
+}
+
+// The (role, company) pairs a search result states about a person:
+//   - LinkedIn's "Current: Founder at Coda Labs" / "Past: CEO at Coda Labs" snippet lines
+//   - the headline, split as "Role at Company" when written that way
+//   - the result's own title + company fields
+// `past` marks a Past/Previous/Former line, which never counts as a current role.
+const SNIPPET_RE = /\b(Current|Past|Previous|Former)\s*:\s*([^\r\n]+?)\s+(?:at|@)\s+([^\r\n]+)/gi;
+function relationsFor(raw, p) {
+  const rels = [];
+  for (const text of stringValues(raw)) {
+    for (const m of text.matchAll(SNIPPET_RE)) {
+      rels.push({ role: m[2].trim(), company: m[3].trim(), past: !/^current$/i.test(m[1]) });
+    }
+  }
+  if (p.role) {
+    const m = String(p.role).match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+    rels.push(m ? { role: m[1].trim(), company: m[2].trim(), past: false } : { role: String(p.role), company: p.company || '', past: false });
+  }
+  return rels;
+}
+
 // Keeps only current founders / executives of the company from raw search results, and
 // reports why everyone else was dropped (counts, plus a few role/company examples with no
 // names) so an empty result can be explained instead of just shown as "0 found".
@@ -454,18 +517,27 @@ function pickTeamDetailed(profiles, companyName) {
 
   for (const raw of profiles) {
     const p = profileFields(raw);
-    if (!p.name || !p.linkedin_url || !p.role) { drop('missing_fields', p); continue; }
-    if (!LEADERSHIP_RE.test(p.role)) { drop('not_leadership', p); continue; }
-    if (NOT_CURRENT_RE.test(p.role)) { drop('former_or_advisor', p); continue; }
-    if (!alnum(`${p.role} ${p.company || ''}`).includes(wanted)) { drop('other_company', p); continue; }
+    if (!p.name || !p.linkedin_url) { drop('missing_fields', p); continue; }
+
+    // Judge the person's relationship to THIS company, not their headline alone: a headline
+    // can be about another company or be unrelated text, while LinkedIn's own
+    // "Current: Founder at <company>" / "Past: CEO at <company>" lines say it directly.
+    const mine = relationsFor(raw, p).filter((r) => alnum(`${r.company} ${r.role}`).includes(wanted));
+    if (!mine.length) { drop('other_company', p); continue; }
+    if (mine.every((r) => r.past)) { drop('former_or_advisor', { ...p, role: mine[0].role }); continue; }
+    const leaders = mine.filter((r) => !r.past && LEADERSHIP_RE.test(r.role));
+    if (!leaders.length) { drop('not_leadership', { ...p, role: mine[0].role }); continue; }
+    const current = leaders.find((r) => !NOT_CURRENT_RE.test(r.role));
+    if (!current) { drop('former_or_advisor', { ...p, role: leaders[0].role }); continue; }
+
     const key = normalizeProfileUrl(p.linkedin_url);
     if (seen.has(key)) { drop('duplicate', p); continue; }
     seen.add(key);
     people.push({
       name: p.name,
-      role: p.role,
+      role: current.role,
       linkedin_url: p.linkedin_url,
-      is_founder: /founder|\bowner\b/i.test(p.role),
+      is_founder: /founder|\bowner\b/i.test(current.role),
       connection: connectionFromDegree(raw),
     });
   }
@@ -486,30 +558,90 @@ function pickTeam(profiles, companyName) {
   return pickTeamDetailed(profiles, companyName).people;
 }
 
-// Searches LinkedIn for people at a company with a founder / C-level / VP / head-of
-// title, using ONE search-export launch, then keeps only results whose headline
-// mentions the company and isn't a former/advisory role — a wrong person here would
-// later get a connection request.
+// Combines the outcome of several searches for the same company into one: people de-duplicated
+// by profile (preferring an entry that already knows the connection), counts added up.
+function mergeTeamResults(results) {
+  const byUrl = new Map();
+  for (const r of results) {
+    for (const p of r.people) {
+      const key = normalizeProfileUrl(p.linkedin_url);
+      const existing = byUrl.get(key);
+      if (!existing || (!existing.connection && p.connection)) byUrl.set(key, p);
+    }
+  }
+  const dropped = {};
+  for (const r of results) for (const [k, v] of Object.entries(r.stats.dropped)) dropped[k] = (dropped[k] || 0) + v;
+  const people = [...byUrl.values()];
+  return {
+    people,
+    stats: {
+      searched_for: results[0].stats.searched_for,
+      raw: results.reduce((n, r) => n + r.stats.raw, 0),
+      kept: people.length,
+      dropped,
+      samples: results.flatMap((r) => r.stats.samples).slice(0, 8),
+      fields: (results.find((r) => r.stats.fields.length) || results[0]).stats.fields,
+      // What the Phantom reported on a search that found nothing (e.g. "No results found").
+      phantom_output: [...results].reverse().find((r) => r.stats.raw === 0)?.stats.phantom_output || '',
+    },
+  };
+}
+
+// Searches LinkedIn for the founders / executives of a company, then keeps only people whose
+// current role at that company is a leadership one — a wrong person here would later get a
+// connection request.
+//
+// Plain queries only: LinkedIn answered "No results found" for boolean queries
+// ('"Coda Labs" AND (founder OR CEO ...)') even typed by hand, while "founder Coda Labs"
+// works. Each query surfaces people matching its role word, so two are run and merged:
+// founders, and the CEO. Two launches per company at most, and the second is skipped if the
+// first was slow, to keep the load on the LinkedIn session (and the request time) down.
+const TEAM_QUERY_WORDS = ['founder', 'CEO'];
+const TEAM_SEARCH_BUDGET_MS = 150 * 1000;
+
 async function searchTeam(companyName) {
   const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
-  const roles =
-    'founder OR cofounder OR "co-founder" OR CEO OR CTO OR COO OR CFO OR CMO OR chief OR "managing director" OR president OR "head of" OR VP OR "vice president"';
   const name = searchableCompanyName(companyName);
-  const keywords = `"${name}" AND (${roles})`;
-  const searchUrl =
-    `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}&origin=GLOBAL_SEARCH_HEADER`;
-  console.log('[phantombuster] team search url:', searchUrl);
+  const startedAt = Date.now();
 
-  const profiles = await runSearchAgent(agentId, `team::${name.toLowerCase()}`, {
-    search: searchUrl,
-    ...linkedinAuth(),
-    numberOfResultsPerSearch: 25,
-  });
+  const results = [];
+  const attempts = [];
+  for (const [i, word] of TEAM_QUERY_WORDS.entries()) {
+    if (i > 0 && Date.now() - startedAt > TEAM_SEARCH_BUDGET_MS) {
+      attempts.push({ query: word, skipped: 'first search was slow' });
+      continue;
+    }
+    const searchUrl =
+      `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(`${word} ${name}`)}&origin=GLOBAL_SEARCH_HEADER`;
+    console.log(`[phantombuster] team search (${word}) url:`, searchUrl);
 
-  const result = pickTeamDetailed(profiles, companyName);
-  // Counts and field names only (no personal data) so an empty result can be explained from the logs.
-  console.log(`[phantombuster] team search for "${name}": ${result.stats.raw} raw, ${result.stats.kept} kept, dropped:`, result.stats.dropped, 'fields:', result.stats.fields);
-  return result;
+    let profiles;
+    try {
+      profiles = await runSearchAgent(agentId, `team::${name.toLowerCase()}::${word.toLowerCase()}`, {
+        search: searchUrl,
+        ...linkedinAuth(),
+        numberOfResultsPerSearch: 25,
+      });
+    } catch (err) {
+      // The first search failing is the real problem (session, plan, key) and is reported as such.
+      // A later one failing must not throw away the people the first one already found.
+      if (i === 0) throw err;
+      console.log(`[phantombuster] team search (${word}) failed, keeping earlier results:`, err.message);
+      attempts.push({ query: word, error: String(err.message).slice(0, 200) });
+      continue;
+    }
+
+    const r = pickTeamDetailed(profiles, companyName);
+    r.stats.phantom_output = summarizePhantomOutput(lastRunOutput.get(agentId));
+    results.push(r);
+    attempts.push({ query: word, raw: r.stats.raw, kept: r.stats.kept });
+    // Counts and field names only (no personal data) so an empty result can be explained from the logs.
+    console.log(`[phantombuster] team search (${word}) for "${name}": ${r.stats.raw} raw, ${r.stats.kept} kept, dropped:`, r.stats.dropped, 'fields:', r.stats.fields);
+  }
+
+  const merged = mergeTeamResults(results);
+  merged.stats.attempts = attempts;
+  return merged;
 }
 
 // Finds a company's LinkedIn page URL through the same search-export agent.
