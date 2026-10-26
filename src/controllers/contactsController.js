@@ -3,6 +3,14 @@ const phantombusterService = require('../services/phantombusterService');
 const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
 const { normalizeProfileUrl, isMemberIdUrl } = require('../utils/linkedinUrl');
+const { friendlyPhantomError } = require('../utils/phantomError');
+
+// Sends the failure to the client as { error, code } with a plain-language message.
+function sendPhantomError(res, context, err) {
+  logError(context, err);
+  const f = friendlyPhantomError(err);
+  res.status(f.status).json({ error: f.message, code: f.code });
+}
 
 // yes | no | unknown. "unknown" whenever we can't tell — no connections export
 // available, or the URL is an opaque member-id URL — so we never claim "no" wrongly.
@@ -12,10 +20,10 @@ function connectionFor(url, connectionSet) {
 }
 
 // Re-computes the connection status for the given person contacts and saves changes.
-async function applyConnections(contacts, { force = false } = {}) {
+async function applyConnections(contacts, { force = false, cachedOnly = false } = {}) {
   let connectionSet = null;
   try {
-    connectionSet = await phantombusterService.getConnectionSet({ force });
+    connectionSet = await phantombusterService.getConnectionSet({ force, cachedOnly });
   } catch (err) {
     logError('applyConnections getConnectionSet', err);
   }
@@ -28,7 +36,12 @@ async function applyConnections(contacts, { force = false } = {}) {
   for (const c of contacts) {
     if (c.kind !== 'person') { out.push(c); continue; }
     const connection = connectionFor(c.linkedin_url, connectionSet);
-    if (connection === c.connection) { out.push(c); continue; }
+    // Never replace a known answer with "unknown", and don't downgrade a "yes" (learned from
+    // the search result's connection degree): the export is capped and may use another URL form.
+    if (connection === 'unknown' || connection === c.connection || (connection === 'no' && c.connection === 'yes')) {
+      out.push(c);
+      continue;
+    }
     const { data, error } = await supabase
       .from('lead_contacts')
       .update({ connection, connection_checked_at: now })
@@ -91,11 +104,23 @@ async function findTeam(req, res) {
     }
 
     if (people.length) {
-      const rows = people.map((p) => ({ ...p, lead_id: lead.id, kind: 'person' }));
-      const { error: upsertErr } = await supabase
-        .from('lead_contacts')
-        .upsert(rows, { onConflict: 'lead_id,linkedin_url' });
-      if (upsertErr) { logError('findTeam upsert', upsertErr); return res.status(500).json({ error: upsertErr.message }); }
+      // People whose connection degree was in the search result are saved with it; the rest are
+      // saved without a "connection" key so an existing value isn't overwritten. Two batches,
+      // because a bulk upsert fills missing keys with null and the column is NOT NULL.
+      const now = new Date().toISOString();
+      const withDegree = people
+        .filter((p) => p.connection)
+        .map((p) => ({ ...p, connection_checked_at: now, lead_id: lead.id, kind: 'person' }));
+      const withoutDegree = people
+        .filter((p) => !p.connection)
+        .map(({ connection, ...p }) => ({ ...p, lead_id: lead.id, kind: 'person' }));
+      for (const rows of [withDegree, withoutDegree]) {
+        if (!rows.length) continue;
+        const { error: upsertErr } = await supabase
+          .from('lead_contacts')
+          .upsert(rows, { onConflict: 'lead_id,linkedin_url' });
+        if (upsertErr) { logError('findTeam upsert', upsertErr); return res.status(500).json({ error: upsertErr.message }); }
+      }
     }
 
     const { data: contacts, error: listErr } = await supabase
@@ -105,11 +130,17 @@ async function findTeam(req, res) {
       .eq('kind', 'person');
     if (listErr) { logError('findTeam list', listErr); return res.status(500).json({ error: listErr.message }); }
 
-    const { contacts: checked, connectionsAvailable } = await applyConnections(contacts);
-    res.json({ found: people.length, connections_available: connectionsAvailable, contacts: checked });
+    // cachedOnly: don't start a second multi-minute Phantom run inside this request. Whatever the
+    // search result's connection degree couldn't answer stays "unknown" until "Refresh connections".
+    const { contacts: checked, connectionsAvailable } = await applyConnections(contacts, { cachedOnly: true });
+    res.json({
+      found: people.length,
+      connections_available: connectionsAvailable,
+      unknown_count: checked.filter((c) => c.connection === 'unknown').length,
+      contacts: checked,
+    });
   } catch (err) {
-    logError('findTeam (thrown)', err);
-    res.status(500).json({ error: err.message });
+    sendPhantomError(res, 'findTeam (thrown)', err);
   }
 }
 
@@ -126,8 +157,7 @@ async function checkConnections(req, res) {
     const { contacts, connectionsAvailable } = await applyConnections(data, { force: !!refresh });
     res.json({ checked: contacts.length, connections_available: connectionsAvailable });
   } catch (err) {
-    logError('checkConnections (thrown)', err);
-    res.status(500).json({ error: err.message });
+    sendPhantomError(res, 'checkConnections (thrown)', err);
   }
 }
 
@@ -186,11 +216,12 @@ async function selectContact(req, res) {
         request = { sent: true };
       } catch (sendErr) {
         logError('selectContact sendConnectionRequest', sendErr);
+        const friendly = friendlyPhantomError(sendErr).message;
         await supabase
           .from('lead_contacts')
-          .update({ request_status: 'failed', request_error: sendErr.message })
+          .update({ request_status: 'failed', request_error: friendly })
           .eq('id', contact.id);
-        request = { sent: false, error: sendErr.message };
+        request = { sent: false, error: friendly };
       }
     }
 
@@ -262,8 +293,7 @@ async function refreshPosts(req, res) {
     if (updateErr) { logError('refreshPosts update', updateErr); return res.status(500).json({ error: updateErr.message }); }
     res.json(data);
   } catch (err) {
-    logError('refreshPosts (thrown)', err);
-    res.status(500).json({ error: err.message });
+    sendPhantomError(res, 'refreshPosts (thrown)', err);
   }
 }
 
@@ -333,8 +363,7 @@ async function postComment(req, res) {
     if (error) { logError('postComment update', error); return res.status(500).json({ error: error.message }); }
     res.json(data);
   } catch (err) {
-    logError('postComment (thrown)', err);
-    res.status(500).json({ error: err.message });
+    sendPhantomError(res, 'postComment (thrown)', err);
   }
 }
 

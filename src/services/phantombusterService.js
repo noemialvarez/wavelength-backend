@@ -17,6 +17,17 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MIN_LAUNCH_INTERVAL_MS = 30 * 1000;
 const PARALLELISM_RETRY_WAIT_MS = 15 * 1000;
 
+// LinkedIn credentials sent with every launch. LinkedIn ties a session cookie to the browser
+// that created it, so PhantomBuster's own guidance is to supply the cookie together with that
+// browser's user agent. The user agent is optional here: set PHANTOMBUSTER_LINKEDIN_USER_AGENT
+// (copied from the same browser as the li_at cookie) and it's sent along with the cookie.
+function linkedinAuth() {
+  const auth = { sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION };
+  const userAgent = (process.env.PHANTOMBUSTER_LINKEDIN_USER_AGENT || '').trim();
+  if (userAgent) auth.userAgent = userAgent;
+  return auth;
+}
+
 async function launchAgent(agentId, args = {}) {
   const body = { id: agentId, argument: JSON.stringify(args) };
   console.log('[phantombuster] request body:', JSON.stringify(body).replace(/("sessionCookie\\?":\\?")[^"\\]*/g, '$1[redacted]'));
@@ -170,7 +181,7 @@ async function launchFounderSearch(companyName, searchTitle) {
 
   const profiles = await runSearchAgent(agentId, cacheKey, {
     search: searchUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
     numberOfResultsPerSearch: 10,
   });
 
@@ -191,7 +202,7 @@ async function searchPersonByName(firstName, lastName, company) {
 
   const profiles = await runSearchAgent(agentId, cacheKey, {
     search: searchUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
     numberOfResultsPerSearch: 5,
   });
 
@@ -226,7 +237,7 @@ async function sendConnectionRequest(profileUrl, note) {
     profileUrl,
     numberOfAddsPerLaunch: 1,
     message: note || '',
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
   });
   return waitForAgent(agentId, launch.containerId);
 }
@@ -249,7 +260,7 @@ async function fetchAcceptedConnections(limit = 100) {
   const launch = await launchAgent(agentId, {
     numberOfProfiles: limit,
     sortBy: 'Recently added',
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
   });
   const output = await waitForAgent(agentId, launch.containerId, 5000, 180000);
   return fetchS3Results(output.output);
@@ -279,7 +290,7 @@ async function sendLinkedInMessage(profileUrl, message) {
   const launch = await launchAgent(agentId, {
     spreadsheetUrl: profileUrl,
     message,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
   });
   return waitForAgent(agentId, launch.containerId);
 }
@@ -287,7 +298,7 @@ async function sendLinkedInMessage(profileUrl, message) {
 async function enrichFounder(lead) {
   const launch = await launchAgent(process.env.PHANTOMBUSTER_SALES_NAV_AGENT_ID, {
     profileUrl: lead.linkedin_url,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
   });
 
   const result = await waitForAgent(process.env.PHANTOMBUSTER_SALES_NAV_AGENT_ID, launch.containerId);
@@ -303,7 +314,7 @@ async function enrichFounder(lead) {
 async function fetchLinkedInActivity(profileUrls) {
   const launch = await launchAgent(process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID, {
     profileUrls,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
     numberOfPosts: 5,
   });
 
@@ -327,7 +338,7 @@ async function postLinkedInComment(csvUrl) {
   const agentId = process.env.PHANTOMBUSTER_COMMENT_AGENT_ID;
   const launch = await launchAgent(agentId, {
     spreadsheetUrl: csvUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
   });
   return waitForAgent(agentId, launch.containerId);
 }
@@ -344,11 +355,14 @@ let connectionInFlight = null;
 // Connections Export (cached for 6h — the export is slow and rate-limited).
 // Returns null when the agent isn't configured or the export came back empty, so
 // callers can report "unknown" instead of wrongly reporting "not connected".
-async function getConnectionSet({ force = false } = {}) {
+async function getConnectionSet({ force = false, cachedOnly = false } = {}) {
   if (!isConnectionsCheckAgentConfigured()) return null;
   if (!force && connectionCache.set && Date.now() - connectionCache.ts < CONNECTIONS_TTL_MS) {
     return connectionCache.set;
   }
+  // cachedOnly: never launch the (slow) export here — used by Find team so one click doesn't
+  // chain two multi-minute Phantom runs. "Refresh connections" does the real export.
+  if (cachedOnly) return null;
   if (connectionInFlight) return connectionInFlight;
 
   connectionInFlight = (async () => {
@@ -385,6 +399,18 @@ function profileFields(r) {
   };
 }
 
+// LinkedIn search results carry the connection degree of each person relative to the
+// logged-in account ("1st" / "2nd" / "3rd"). That answers "are we connected?" without the
+// slow Connections Export and without matching profile URLs. Returns undefined when absent.
+function connectionFromDegree(r) {
+  const d = r.connectionDegree ?? r.degree ?? r.distance ?? r.connection_degree;
+  if (d == null) return undefined;
+  const s = String(d).toLowerCase();
+  if (/\b1(st)?\b|first/.test(s)) return 'yes';
+  if (/\b[23](nd|rd)?\b|second|third|out of network/.test(s)) return 'no';
+  return undefined;
+}
+
 // Keeps only current founders / executives of the company from raw search results.
 function pickTeam(profiles, companyName) {
   const wanted = alnum(companyName);
@@ -403,6 +429,7 @@ function pickTeam(profiles, companyName) {
       role: p.role,
       linkedin_url: p.linkedin_url,
       is_founder: /founder|\bowner\b/i.test(p.role),
+      connection: connectionFromDegree(raw),
     });
   }
   return people;
@@ -423,10 +450,12 @@ async function searchTeam(companyName) {
 
   const profiles = await runSearchAgent(agentId, `team::${companyName.toLowerCase()}`, {
     search: searchUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
     numberOfResultsPerSearch: 25,
   });
 
+  // Field names only (no personal data) so a changed result shape is easy to spot in the logs.
+  console.log(`[phantombuster] team search for "${companyName}": ${profiles.length} raw results, fields:`, Object.keys(profiles[0] || {}));
   return pickTeam(profiles, companyName);
 }
 
@@ -438,7 +467,7 @@ async function searchCompanyPage(companyName) {
     `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(companyName)}&origin=GLOBAL_SEARCH_HEADER`;
   const profiles = await runSearchAgent(agentId, `company-page::${companyName.toLowerCase()}`, {
     search: searchUrl,
-    sessionCookie: process.env.PHANTOMBUSTER_LINKEDIN_SESSION,
+    ...linkedinAuth(),
     numberOfResultsPerSearch: 5,
   });
   const wanted = alnum(companyName);
