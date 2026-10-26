@@ -142,6 +142,9 @@ function apolloError(err, what) {
   if (status === 403) {
     return make(502, 'apollo_plan', "Apollo says this key isn't allowed to use that search. Check the key's endpoint scopes (People API Search, Organization Search, People Enrichment), use a master API key, or use a plan that includes API access.", true);
   }
+  if (err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')) {
+    return make(502, 'apollo_timeout', `Apollo took too long to answer the ${what}. Large companies can be slow — try again in a minute.`, false);
+  }
   if (status === 429) return make(502, 'apollo_rate', 'Apollo is rate limiting requests. Wait a few minutes and try again.', false);
   if (status === 422) return make(502, 'apollo_request', `Apollo rejected the ${what} request: ${JSON.stringify(err.response.data).slice(0, 200)}`, false);
   return make(502, 'apollo', `Apollo ${what} failed: ${err?.message || 'unknown error'}`, false);
@@ -156,15 +159,24 @@ function queryString(entries) {
   return qs.toString();
 }
 
-async function apolloPost(path, entries, what) {
-  try {
-    const { data } = await axios.post(`${APOLLO_API}${path}?${queryString(entries)}`, null, {
-      headers: apolloHeaders(),
-      timeout: 20000,
-    });
-    return data;
-  } catch (err) {
-    throw apolloError(err, what);
+// Apollo can be slow for large companies (a 20s wait was not enough for Deep Instinct), so each
+// call waits longer and a timeout is retried once. Other errors (key, plan, rate limit) are not.
+async function apolloPost(path, entries, what, { timeoutMs = 30000, retries = 1 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { data } = await axios.post(`${APOLLO_API}${path}?${queryString(entries)}`, null, {
+        headers: apolloHeaders(),
+        timeout: timeoutMs,
+      });
+      return data;
+    } catch (err) {
+      const timedOut = err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message || '');
+      if (timedOut && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      throw apolloError(err, what);
+    }
   }
 }
 
@@ -203,7 +215,7 @@ async function searchPeople(orgFilter, { seniorities, perPage }) {
   const entries = [...orgFilter];
   if (seniorities) entries.push(['person_seniorities', seniorities]);
   entries.push(['per_page', perPage], ['page', 1]);
-  const data = await apolloPost('/mixed_people/api_search', entries, 'people search');
+  const data = await apolloPost('/mixed_people/api_search', entries, 'people search', { timeoutMs: 45000, retries: 1 });
   const seen = new Set();
   const people = [];
   for (const p of [...(data?.people || []), ...(data?.contacts || [])]) {
@@ -221,21 +233,30 @@ async function searchPeople(orgFilter, { seniorities, perPage }) {
 // new companies), everyone it lists, keeping those with a leadership title. All free searches.
 // `trail` records what each attempt returned, so an empty result can be explained.
 async function findLeaders(filters, trail) {
+  let error = null;
   for (const f of filters) {
     const step = { by: f.by };
     trail.push(step);
-    const tagged = await searchPeople(f.entries, { seniorities: LEADER_SENIORITIES, perPage: 25 });
-    step.tagged_leaders = tagged.people.length;
-    if (tagged.people.length) return { people: tagged.people, total: tagged.total };
-    const everyone = await searchPeople(f.entries, { perPage: 100 });
-    const byTitle = everyone.people.filter((p) => LEADERSHIP_TITLE_RE.test(p.title || ''));
-    step.listed = everyone.total;
-    step.leaders_by_title = byTitle.length;
-    // The titles Apollo has for them (no names), so "lists N people, none senior" can be explained.
-    step.titles = everyone.people.slice(0, 10).map((p) => String(p.title || '(no title)').slice(0, 50));
-    if (byTitle.length) return { people: byTitle, total: byTitle.length };
+    try {
+      const tagged = await searchPeople(f.entries, { seniorities: LEADER_SENIORITIES, perPage: 25 });
+      step.tagged_leaders = tagged.people.length;
+      if (tagged.people.length) return { people: tagged.people, total: tagged.total };
+      const everyone = await searchPeople(f.entries, { perPage: 100 });
+      const byTitle = everyone.people.filter((p) => LEADERSHIP_TITLE_RE.test(p.title || ''));
+      step.listed = everyone.total;
+      step.leaders_by_title = byTitle.length;
+      // The titles Apollo has for them (no names), so "lists N people, none senior" can be explained.
+      step.titles = everyone.people.slice(0, 10).map((p) => String(p.title || '(no title)').slice(0, 50));
+      if (byTitle.length) return { people: byTitle, total: byTitle.length };
+    } catch (err) {
+      if (err.fatal) throw err; // key / plan problem: nothing else will work either
+      // A slow or failed search must not read as "Apollo lists nobody": remember it, try the next
+      // way of finding the company, and report it if nothing turns up.
+      step.error = err.friendly?.code || 'error';
+      error = error || err;
+    }
   }
-  return { people: [], total: 0 };
+  return { people: [], total: 0, error };
 }
 
 // Last resort: Apollo sometimes files a company's founders under a different record (or none), so
@@ -244,7 +265,14 @@ async function findLeaders(filters, trail) {
 async function findLeadersByName(name, trail) {
   const step = { by: 'name search' };
   trail.push(step);
-  const res = await searchPeople([['q_keywords', name]], { seniorities: LEADER_SENIORITIES, perPage: 100 });
+  let res;
+  try {
+    res = await searchPeople([['q_keywords', name]], { seniorities: LEADER_SENIORITIES, perPage: 100 });
+  } catch (err) {
+    if (err.fatal) throw err;
+    step.error = err.friendly?.code || 'error';
+    return { people: [], total: 0, error: err };
+  }
   const wanted = alnum(name);
   const atCompany = res.people.filter((p) => alnum(searchableCompanyName(p.organization?.name)) === wanted);
   step.returned = res.people.length;
@@ -305,6 +333,8 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
     const trail = [];
     found = await findLeaders([{ by: 'website', entries: [['q_organization_domains_list', [domain]]] }], trail);
     stats.tried.push({ org: domain, domain, steps: trail });
+    // Nobody found AND a search failed (e.g. timed out): that is not "Apollo lists nobody".
+    if (!found.people.length && found.error) throw found.error;
   } else {
     const orgs = await searchOrganizations(name);
     stats.credits_estimate += 1;
@@ -313,10 +343,12 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
     if (!matches.length) return { people: [], org: null, stats };
     stats.org_found = true;
     stats.org_matches = matches.length; // more than one means several Apollo companies share this name
+    let searchError = null; // a search that failed (e.g. timed out) rather than coming back empty
     for (const candidate of matches) {
       const trail = [];
       const attempt = await findLeaders(organizationFilters(candidate), trail);
       stats.tried.push({ org: candidate.name, domain: candidate.primary_domain || null, steps: trail });
+      if (attempt.error) searchError = searchError || attempt.error;
       if (attempt.people.length) { org = candidate; found = attempt; break; }
     }
     if (!org) {
@@ -324,7 +356,10 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
       const trail = [];
       const byName = await findLeadersByName(name, trail);
       stats.tried.push({ org: 'search by company name', domain: null, steps: trail });
+      if (byName.error) searchError = searchError || byName.error;
       if (byName.people.length) found = byName;
+      // Nobody found AND some search failed: report the failure instead of "Apollo lists nobody".
+      if (!found.people.length && searchError) throw searchError;
     }
     stats.org_name = org.name;
     stats.org_domain = org.primary_domain || null; // which company record the people came from
