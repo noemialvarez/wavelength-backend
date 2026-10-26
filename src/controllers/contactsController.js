@@ -88,7 +88,7 @@ async function findTeam(req, res) {
     if (error) { logError('findTeam fetch lead', error); return res.status(404).json({ error: 'Lead not found' }); }
     if (!lead.company) return res.status(400).json({ error: 'Lead has no company name to search for' });
 
-    const people = await phantombusterService.searchTeam(lead.company);
+    const { people, stats } = await phantombusterService.searchTeam(lead.company);
 
     // Keep the founder already found for this lead, even if the team search missed them.
     if (lead.linkedin_url && lead.name && lead.name !== lead.company) {
@@ -137,6 +137,7 @@ async function findTeam(req, res) {
       found: people.length,
       connections_available: connectionsAvailable,
       unknown_count: checked.filter((c) => c.connection === 'unknown').length,
+      search: stats, // how many raw results LinkedIn returned and why any were dropped
       contacts: checked,
     });
   } catch (err) {

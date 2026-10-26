@@ -386,7 +386,32 @@ const LEADERSHIP_RE = /founder|\bceo\b|\bcto\b|\bcoo\b|\bcfo\b|\bcmo\b|\bcpo\b|\
 const NOT_CURRENT_RE = /\b(former|formerly|ex[- ]|advisor|adviser|investor|board member)\b/i;
 
 function alnum(str) {
-  return String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return String(str || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // ignore accents: "Zürich" matches "Zurich"
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+const LEGAL_SUFFIX_RE = /[\s,.]+(ag|gmbh|sa|sarl|sàrl|ltd|limited|inc|llc|plc|bv|nv|ab|oy|kg|co)\.?$/i;
+
+// The name to search LinkedIn for. A lead's "company" is sometimes a URL (e.g.
+// "https://deepinstinct.com"), which can't match any profile, and legal suffixes ("AG",
+// "GmbH", "Inc") usually aren't written in people's headlines — both made searches miss.
+function searchableCompanyName(name) {
+  let s = String(name || '').trim();
+  if (/^(https?:\/\/|www\.)/i.test(s) || (/^[a-z0-9-]+(\.[a-z0-9-]+)+(\/.*)?$/i.test(s) && !/\s/.test(s))) {
+    try {
+      const host = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`).hostname.replace(/^www\./i, '');
+      const parts = host.split('.');
+      const secondLevel = ['co', 'com', 'org', 'net', 'ac', 'gov'];
+      s = parts.length >= 3 && secondLevel.includes(parts[parts.length - 2])
+        ? parts[parts.length - 3]
+        : parts[Math.max(0, parts.length - 2)];
+    } catch { /* keep the original text */ }
+  }
+  for (let i = 0; i < 2; i++) s = s.replace(LEGAL_SUFFIX_RE, '');
+  return s.trim();
 }
 
 function profileFields(r) {
@@ -411,18 +436,30 @@ function connectionFromDegree(r) {
   return undefined;
 }
 
-// Keeps only current founders / executives of the company from raw search results.
-function pickTeam(profiles, companyName) {
-  const wanted = alnum(companyName);
+// Keeps only current founders / executives of the company from raw search results, and
+// reports why everyone else was dropped (counts, plus a few role/company examples with no
+// names) so an empty result can be explained instead of just shown as "0 found".
+function pickTeamDetailed(profiles, companyName) {
+  const wanted = alnum(searchableCompanyName(companyName));
   const seen = new Set();
   const people = [];
+  const dropped = { missing_fields: 0, not_leadership: 0, former_or_advisor: 0, other_company: 0, duplicate: 0 };
+  const samples = [];
+  const drop = (reason, p) => {
+    dropped[reason]++;
+    if (samples.length < 8) {
+      samples.push({ reason, role: String(p.role || '').slice(0, 90), company: String(p.company || '').slice(0, 60) });
+    }
+  };
+
   for (const raw of profiles) {
     const p = profileFields(raw);
-    if (!p.name || !p.linkedin_url || !p.role) continue;
-    if (!LEADERSHIP_RE.test(p.role) || NOT_CURRENT_RE.test(p.role)) continue;
-    if (!alnum(`${p.role} ${p.company || ''}`).includes(wanted)) continue;
+    if (!p.name || !p.linkedin_url || !p.role) { drop('missing_fields', p); continue; }
+    if (!LEADERSHIP_RE.test(p.role)) { drop('not_leadership', p); continue; }
+    if (NOT_CURRENT_RE.test(p.role)) { drop('former_or_advisor', p); continue; }
+    if (!alnum(`${p.role} ${p.company || ''}`).includes(wanted)) { drop('other_company', p); continue; }
     const key = normalizeProfileUrl(p.linkedin_url);
-    if (seen.has(key)) continue;
+    if (seen.has(key)) { drop('duplicate', p); continue; }
     seen.add(key);
     people.push({
       name: p.name,
@@ -432,7 +469,21 @@ function pickTeam(profiles, companyName) {
       connection: connectionFromDegree(raw),
     });
   }
-  return people;
+  return {
+    people,
+    stats: {
+      searched_for: searchableCompanyName(companyName),
+      raw: profiles.length,
+      kept: people.length,
+      dropped,
+      samples,
+      fields: Object.keys(profiles[0] || {}),
+    },
+  };
+}
+
+function pickTeam(profiles, companyName) {
+  return pickTeamDetailed(profiles, companyName).people;
 }
 
 // Searches LinkedIn for people at a company with a founder / C-level / VP / head-of
@@ -443,20 +494,22 @@ async function searchTeam(companyName) {
   const agentId = process.env.PHANTOMBUSTER_LINKEDIN_SEARCH_AGENT_ID;
   const roles =
     'founder OR cofounder OR "co-founder" OR CEO OR CTO OR COO OR CFO OR CMO OR chief OR "managing director" OR president OR "head of" OR VP OR "vice president"';
-  const keywords = `"${companyName}" AND (${roles})`;
+  const name = searchableCompanyName(companyName);
+  const keywords = `"${name}" AND (${roles})`;
   const searchUrl =
     `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}&origin=GLOBAL_SEARCH_HEADER`;
   console.log('[phantombuster] team search url:', searchUrl);
 
-  const profiles = await runSearchAgent(agentId, `team::${companyName.toLowerCase()}`, {
+  const profiles = await runSearchAgent(agentId, `team::${name.toLowerCase()}`, {
     search: searchUrl,
     ...linkedinAuth(),
     numberOfResultsPerSearch: 25,
   });
 
-  // Field names only (no personal data) so a changed result shape is easy to spot in the logs.
-  console.log(`[phantombuster] team search for "${companyName}": ${profiles.length} raw results, fields:`, Object.keys(profiles[0] || {}));
-  return pickTeam(profiles, companyName);
+  const result = pickTeamDetailed(profiles, companyName);
+  // Counts and field names only (no personal data) so an empty result can be explained from the logs.
+  console.log(`[phantombuster] team search for "${name}": ${result.stats.raw} raw, ${result.stats.kept} kept, dropped:`, result.stats.dropped, 'fields:', result.stats.fields);
+  return result;
 }
 
 // Finds a company's LinkedIn page URL through the same search-export agent.
@@ -506,6 +559,8 @@ module.exports = {
   getConnectionSet,
   searchTeam,
   pickTeam,
+  pickTeamDetailed,
+  searchableCompanyName,
   searchCompanyPage,
   fetchPostsFor,
   isMessageAgentConfigured,
