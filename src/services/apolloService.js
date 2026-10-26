@@ -177,23 +177,70 @@ async function searchOrganizations(name) {
 // The organization whose name is the company we asked for. Exact match only (ignoring legal
 // suffixes and punctuation): Apollo's name search is partial, and the wrong company would mean
 // sending connection requests to the wrong people.
-function pickOrganization(orgs, name) {
+// Apollo can hold several records with the same name (duplicates, old and new), so every exact
+// match is returned, best first, up to 3.
+function pickOrganizations(orgs, name) {
   const wanted = alnum(name);
-  if (!wanted) return null;
+  if (!wanted) return [];
   const clean = (o) => alnum(searchableCompanyName(o.name));
   // A company named like its own web address ("Create.xyz") matches Apollo's record by domain.
   const byDomain = (o) => !!o.primary_domain && alnum(o.primary_domain) === wanted;
-  return orgs.find((o) => clean(o) === wanted) || orgs.find((o) => alnum(o.name) === wanted) || orgs.find(byDomain) || null;
+  const rank = (o) => (clean(o) === wanted ? 0 : alnum(o.name) === wanted ? 1 : byDomain(o) ? 2 : 3);
+  return orgs.filter((o) => rank(o) < 3).sort((a, b) => rank(a) - rank(b)).slice(0, 3);
 }
 
-// People API Search: current founders, owners, C-suite, VPs and heads of the organization. 0 credits.
-async function searchLeaders(orgFilter) {
-  const data = await apolloPost(
-    '/mixed_people/api_search',
-    [...orgFilter, ['person_seniorities', LEADER_SENIORITIES], ['per_page', 25], ['page', 1]],
-    'people search',
-  );
-  return { people: data?.people || [], total: data?.total_entries ?? data?.pagination?.total_entries ?? (data?.people || []).length };
+function pickOrganization(orgs, name) {
+  return pickOrganizations(orgs, name)[0] || null;
+}
+
+// Titles that make someone part of the leadership, for when Apollo hasn't tagged seniority.
+const LEADERSHIP_TITLE_RE = /founder|\bceo\b|\bcto\b|\bcoo\b|\bcfo\b|\bcmo\b|\bcpo\b|\bcro\b|\bcio\b|chief|managing director|\bpresident\b|\bvp\b|vice president|head of|\bowner\b|\bpartner\b/i;
+
+// People API Search for one organization filter. 0 credits. The search lists people Apollo hasn't
+// shown you before under `people` and anyone already saved in your Apollo account under `contacts`,
+// so both are read (a contact's Apollo person ID is `person_id`).
+async function searchPeople(orgFilter, { seniorities, perPage }) {
+  const entries = [...orgFilter];
+  if (seniorities) entries.push(['person_seniorities', seniorities]);
+  entries.push(['per_page', perPage], ['page', 1]);
+  const data = await apolloPost('/mixed_people/api_search', entries, 'people search');
+  const seen = new Set();
+  const people = [];
+  for (const p of [...(data?.people || []), ...(data?.contacts || [])]) {
+    const id = p.person_id || p.id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    people.push({ ...p, id });
+  }
+  return { people, total: data?.total_entries ?? data?.pagination?.total_entries ?? people.length };
+}
+
+// The founders / executives Apollo lists for a company, trying each way of pointing at it:
+// by Apollo company ID, then by website domain. For each, first the people Apollo has tagged
+// founder / owner / C-suite / VP / head; if there are none (Apollo often hasn't tagged small or
+// new companies), everyone it lists, keeping those with a leadership title. All free searches.
+// `trail` records what each attempt returned, so an empty result can be explained.
+async function findLeaders(filters, trail) {
+  for (const f of filters) {
+    const step = { by: f.by };
+    trail.push(step);
+    const tagged = await searchPeople(f.entries, { seniorities: LEADER_SENIORITIES, perPage: 25 });
+    step.tagged_leaders = tagged.people.length;
+    if (tagged.people.length) return { people: tagged.people, total: tagged.total };
+    const everyone = await searchPeople(f.entries, { perPage: 100 });
+    const byTitle = everyone.people.filter((p) => LEADERSHIP_TITLE_RE.test(p.title || ''));
+    step.listed = everyone.total;
+    step.leaders_by_title = byTitle.length;
+    if (byTitle.length) return { people: byTitle, total: byTitle.length };
+  }
+  return { people: [], total: 0 };
+}
+
+function organizationFilters(org) {
+  const filters = [];
+  if (org.id) filters.push({ by: 'company id', entries: [['organization_ids', [org.id]]] });
+  if (org.primary_domain) filters.push({ by: 'website', entries: [['q_organization_domains_list', [org.primary_domain]]] });
+  return filters;
 }
 
 // Most senior first, founders ahead of everyone.
@@ -227,30 +274,35 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
 
   const stats = {
     source: 'apollo', searched_for: name, org_found: false, org_name: null, org_candidates: [],
-    raw: 0, kept: 0, no_linkedin: 0, enrich_failed: 0, credits_estimate: 0,
+    raw: 0, kept: 0, no_linkedin: 0, enrich_failed: 0, credits_estimate: 0, tried: [],
   };
 
-  // 1. which Apollo company
-  let orgFilter;
+  // 1 + 2. which Apollo company, and who leads it
   let org = null;
+  let found = { people: [], total: 0 };
   const domain = domainOf(companyName);
   if (domain) {
-    orgFilter = [['q_organization_domains_list', [domain]]];
     stats.org_found = true;
     stats.org_name = domain;
+    const trail = [];
+    found = await findLeaders([{ by: 'website', entries: [['q_organization_domains_list', [domain]]] }], trail);
+    stats.tried.push({ org: domain, domain, steps: trail });
   } else {
     const orgs = await searchOrganizations(name);
     stats.credits_estimate += 1;
-    org = pickOrganization(orgs, name);
+    const matches = pickOrganizations(orgs, name);
     stats.org_candidates = orgs.slice(0, 5).map((o) => o.name);
-    if (!org) return { people: [], org: null, stats };
+    if (!matches.length) return { people: [], org: null, stats };
     stats.org_found = true;
+    for (const candidate of matches) {
+      const trail = [];
+      const attempt = await findLeaders(organizationFilters(candidate), trail);
+      stats.tried.push({ org: candidate.name, domain: candidate.primary_domain || null, steps: trail });
+      if (attempt.people.length) { org = candidate; found = attempt; break; }
+    }
+    if (!org) org = matches[0]; // nobody listed anywhere, but the company's LinkedIn page is still worth keeping
     stats.org_name = org.name;
-    orgFilter = [['organization_ids', [org.id]]];
   }
-
-  // 2. who leads it
-  const found = await searchLeaders(orgFilter);
   stats.raw = found.total;
   // A couple of spare candidates, so a lookup that returns nothing doesn't use up a slot; the cost
   // is still bounded (a lookup that returns no data costs no credit).
@@ -291,5 +343,5 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
 
 module.exports = {
   isConfigured, findEmail, findPerson, getCompanyEmployeeCount,
-  findTeamAtCompany, pickOrganization, rankLeaders, queryString,
+  findTeamAtCompany, pickOrganization, pickOrganizations, rankLeaders, queryString,
 };
