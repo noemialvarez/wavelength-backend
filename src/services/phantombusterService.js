@@ -348,7 +348,9 @@ async function enrichFounder(lead) {
 // Recent activity (posts, and for people also likes/comments) of one or more LinkedIn pages, via
 // the LinkedIn Activity Extractor. Like the other agents it saves its results to a file and only
 // prints a log, so the records are read from that file (the log never contains them). The link goes
-// in `spreadsheetUrl`, where these Phantoms take a single URL; `profileUrls` is kept for older setups.
+// in `spreadsheetUrl`, where these Phantoms take a single URL. Nothing else is sent: the Phantom's
+// argument is validated against a strict schema (extra keys make it reject the run), so the number
+// of posts etc. come from the Phantom's own saved settings.
 async function fetchLinkedInActivity(profileUrls) {
   const agentId = process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID;
   const urls = (Array.isArray(profileUrls) ? profileUrls : [profileUrls]).filter(Boolean);
@@ -356,9 +358,7 @@ async function fetchLinkedInActivity(profileUrls) {
   for (const url of urls) {
     const launch = await launchAgent(agentId, {
       spreadsheetUrl: url,
-      profileUrls: [url],
       ...linkedinAuth(),
-      numberOfPosts: 5,
     });
     const result = await waitForAgent(agentId, launch.containerId);
     lastRunOutput.set(agentId, String(result.output || ''));
