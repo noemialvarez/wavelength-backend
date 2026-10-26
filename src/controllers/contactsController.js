@@ -56,7 +56,7 @@ async function applyConnections(contacts, { force = false, cachedOnly = false } 
 
 async function listContacts(req, res) {
   try {
-    const { selected, lead_id } = req.query;
+    const { selected, lead_id, requested } = req.query;
     let query = supabase
       .from('lead_contacts')
       .select('*, leads(id, company, name, status)')
@@ -64,6 +64,8 @@ async function listContacts(req, res) {
       .limit(2000);
     if (selected === 'true') query = query.eq('selected', true);
     if (lead_id) query = query.eq('lead_id', lead_id);
+    // Everyone a connection request was attempted for (sent or failed), for the status list.
+    if (requested === 'true') query = query.neq('request_status', 'none');
 
     const { data, error } = await query;
     if (error) { logError('listContacts', error); return res.status(500).json({ error: error.message }); }
@@ -384,6 +386,13 @@ async function deselectContact(req, res) {
   }
 }
 
+// A company page's posts live under /posts/; the bare page URL only shows its overview.
+function activityUrl(url, kind) {
+  const m = /^(https?:\/\/(?:[a-z]+\.)?linkedin\.com\/(?:company|school)\/[^/?#]+)/i.exec(url || '');
+  if (kind === 'company' && m) return `${m[1]}/posts/?feedView=all`;
+  return url;
+}
+
 // Loads the latest posts for a person / company page and stores a summary of what they post about.
 async function refreshPosts(req, res) {
   try {
@@ -397,10 +406,18 @@ async function refreshPosts(req, res) {
     }
     if (!url) return res.status(422).json({ error: "Couldn't find a LinkedIn page for this company" });
 
-    const posts = await phantombusterService.fetchPostsFor(url);
+    const { posts, debug } = await phantombusterService.fetchPostsFor(activityUrl(url, contact.kind));
     const summary = posts.length
       ? await claudeService.summarizeLinkedInPosts(contact.name, posts)
       : 'No recent public posts found.';
+    // When nothing came back, say what the Phantom did return, so it's clear whether the page
+    // really has no posts or the Phantom's output wasn't understood.
+    const postsNote = posts.length
+      ? null
+      : debug.records
+        ? `The Phantom returned ${debug.records} record(s) but no post text was found in them (fields: ${debug.fields.join(', ') || 'none'}).`
+        : `The Phantom returned no records.${debug.phantom_output ? ` Its last messages: ${debug.phantom_output}` : ''}`;
+    if (postsNote) console.log(`[refreshPosts] ${contact.name}: ${postsNote}`);
 
     const { data, error: updateErr } = await supabase
       .from('lead_contacts')
@@ -415,7 +432,7 @@ async function refreshPosts(req, res) {
       .select()
       .single();
     if (updateErr) { logError('refreshPosts update', updateErr); return res.status(500).json({ error: updateErr.message }); }
-    res.json(data);
+    res.json({ ...data, posts_note: postsNote });
   } catch (err) {
     sendPhantomError(res, 'refreshPosts (thrown)', err);
   }

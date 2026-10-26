@@ -345,21 +345,70 @@ async function enrichFounder(lead) {
   return {};
 }
 
+// Recent activity (posts, and for people also likes/comments) of one or more LinkedIn pages, via
+// the LinkedIn Activity Extractor. Like the other agents it saves its results to a file and only
+// prints a log, so the records are read from that file (the log never contains them). The link goes
+// in `spreadsheetUrl`, where these Phantoms take a single URL; `profileUrls` is kept for older setups.
 async function fetchLinkedInActivity(profileUrls) {
-  const launch = await launchAgent(process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID, {
-    profileUrls,
-    ...linkedinAuth(),
-    numberOfPosts: 5,
-  });
-
-  const result = await waitForAgent(process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID, launch.containerId);
-
-  const lines = (result.output || '').split('\n').filter(Boolean);
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID;
+  const urls = (Array.isArray(profileUrls) ? profileUrls : [profileUrls]).filter(Boolean);
   const activities = [];
-  for (const line of lines) {
-    try { activities.push(...JSON.parse(line)); } catch {}
+  for (const url of urls) {
+    const launch = await launchAgent(agentId, {
+      spreadsheetUrl: url,
+      profileUrls: [url],
+      ...linkedinAuth(),
+      numberOfPosts: 5,
+    });
+    const result = await waitForAgent(agentId, launch.containerId);
+    lastRunOutput.set(agentId, String(result.output || ''));
+    activities.push(...(await fetchS3Results(result.output)));
   }
   return activities;
+}
+
+// Field names this Phantom uses for a post's text, link, date and kind aren't documented, so the
+// likely ones are tried in turn, with a fallback to the longest free-text field.
+const ACTIVITY_TEXT_KEYS = ['postContent', 'postText', 'text', 'content', 'postBody', 'body', 'commentary', 'description', 'message'];
+const ACTIVITY_URL_KEYS = ['postUrl', 'postURL', 'postLink', 'url', 'link', 'permalink', 'shareUrl'];
+const ACTIVITY_DATE_KEYS = ['postDate', 'date', 'timestamp', 'publishedAt', 'postTimestamp', 'publishedDate', 'timeAgo'];
+const ACTIVITY_TYPE_KEYS = ['action', 'type', 'activityType', 'postType'];
+
+function firstString(rec, keys) {
+  for (const k of keys) {
+    if (typeof rec[k] === 'string' && rec[k].trim()) return rec[k].trim();
+  }
+  return '';
+}
+
+function normalizeActivity(a) {
+  let text = firstString(a, ACTIVITY_TEXT_KEYS);
+  if (!text) {
+    const candidates = Object.entries(a)
+      .filter(([k, v]) => typeof v === 'string' && !/url|link|image|photo|date|time|id$/i.test(k) && !/^https?:\/\//i.test(v))
+      .map(([, v]) => v.trim())
+      .sort((x, y) => y.length - x.length);
+    if (candidates[0] && candidates[0].length >= 20) text = candidates[0]; // too short to be a post otherwise
+  }
+  const postUrl =
+    firstString(a, ACTIVITY_URL_KEYS) ||
+    stringValues(a).find((s) => /linkedin\.com\/(posts|feed\/update)/i.test(s)) ||
+    null;
+  return {
+    text,
+    post_url: postUrl,
+    date: firstString(a, ACTIVITY_DATE_KEYS) || null,
+    type: firstString(a, ACTIVITY_TYPE_KEYS) || 'post',
+  };
+}
+
+// Posts the page itself published. A person's activity also lists what they liked or commented
+// on; those are only used when there are no posts of their own, since a summary of "what they
+// post about" should come from what they wrote.
+function normalizeActivities(activities) {
+  const items = activities.map(normalizeActivity).filter((a) => a.text);
+  const own = items.filter((a) => /post|share|article/i.test(a.type) && !/like|react|comment/i.test(a.type));
+  return (own.length ? own : items).slice(0, 5);
 }
 
 // The Auto Commenter reads its post URL(s) and comment(s) from a spreadsheet (Google
@@ -638,17 +687,20 @@ async function searchCompanyPage(companyName) {
 }
 
 // Recent posts for a single profile / company page via the LinkedIn Activity agent.
+// Returns { posts, debug }: `debug` says what the Phantom returned (how many records, their field
+// names, and its own last messages) so an empty result can be explained instead of just "no posts".
 async function fetchPostsFor(url) {
   const activities = await fetchLinkedInActivity([url]);
-  return activities
-    .map((a) => ({
-      text: a.text || a.content || '',
-      post_url: a.postUrl || a.url || null,
-      date: a.date || null,
-      type: a.type || 'post',
-    }))
-    .filter((a) => a.text)
-    .slice(0, 5);
+  const posts = normalizeActivities(activities);
+  const agentId = process.env.PHANTOMBUSTER_LINKEDIN_AGENT_ID;
+  return {
+    posts,
+    debug: {
+      records: activities.length,
+      fields: Object.keys(activities[0] || {}),
+      phantom_output: summarizePhantomOutput(lastRunOutput.get(agentId)),
+    },
+  };
 }
 
 module.exports = {
@@ -666,6 +718,7 @@ module.exports = {
   searchableCompanyName,
   searchCompanyPage,
   fetchPostsFor,
+  normalizeActivities,
   isMessageAgentConfigured,
   sendLinkedInMessage,
   enrichFounder,
