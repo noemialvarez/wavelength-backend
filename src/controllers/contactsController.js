@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const phantombusterService = require('../services/phantombusterService');
+const apolloService = require('../services/apolloService');
 const claudeService = require('../services/claudeService');
 const logError = require('../utils/logError');
 const { normalizeProfileUrl, isMemberIdUrl } = require('../utils/linkedinUrl');
@@ -73,8 +74,63 @@ async function listContacts(req, res) {
   }
 }
 
-// Finds the founders and executive team of a lead's company on LinkedIn, saves them as
-// contacts, and checks which ones we're already connected to.
+// What an Apollo lookup tells us beyond the people themselves:
+//  - the company's LinkedIn page, saved so LinkedIn Engagement doesn't need a separate search for it
+//  - the most senior person with an email becomes the lead's own contact (name, role, LinkedIn,
+//    email) when the lead has none yet — that is what Email Outreach and the older LinkedIn
+//    message funnel read. Never overwrites anything already set.
+async function applyApolloFindings(lead, people, org) {
+  try {
+    if (org?.linkedin_url) {
+      const { data: existing } = await supabase
+        .from('lead_contacts')
+        .select('id, linkedin_url')
+        .eq('lead_id', lead.id)
+        .eq('kind', 'company')
+        .maybeSingle();
+      if (!existing) {
+        await supabase.from('lead_contacts').insert({
+          lead_id: lead.id, kind: 'company', name: org.name || lead.company, linkedin_url: org.linkedin_url, selected: false,
+        });
+      } else if (!existing.linkedin_url) {
+        await supabase.from('lead_contacts').update({ linkedin_url: org.linkedin_url }).eq('id', existing.id);
+      }
+    }
+
+    if (people.length) {
+      const primary = people.find((p) => p.email) || people[0];
+      const patch = {};
+      if (!lead.linkedin_url) {
+        patch.name = primary.name;
+        patch.role = primary.role;
+        patch.linkedin_url = primary.linkedin_url;
+      }
+      // only set the email alongside the person it belongs to
+      if (!lead.email && primary.email && (patch.linkedin_url || normalizeProfileUrl(lead.linkedin_url) === normalizeProfileUrl(primary.linkedin_url))) {
+        patch.email = primary.email;
+      }
+      if (Object.keys(patch).length) await supabase.from('leads').update(patch).eq('id', lead.id);
+    }
+  } catch (err) {
+    // Nice-to-have enrichment: never fail the team lookup over it.
+    logError('applyApolloFindings', err);
+  }
+}
+
+// Where founders / executives come from: Apollo when it's configured (precise, takes seconds, no
+// LinkedIn session involved), otherwise PhantomBuster's LinkedIn search. PEOPLE_SOURCE=apollo or
+// =phantombuster forces one.
+function peopleSource() {
+  const forced = (process.env.PEOPLE_SOURCE || '').trim().toLowerCase();
+  if (forced === 'apollo' || forced === 'phantombuster') return forced;
+  return apolloService.isConfigured() ? 'apollo' : 'phantombuster';
+}
+
+// Only the columns that exist on lead_contacts (a person from Apollo also carries an email).
+const contactFields = (p) => ({ name: p.name, role: p.role, linkedin_url: p.linkedin_url, is_founder: !!p.is_founder });
+
+// Finds the founders and executive team of a lead's company, saves them as contacts, and checks
+// which ones we're already connected to.
 async function findTeam(req, res) {
   try {
     const { lead_id } = req.body;
@@ -82,16 +138,29 @@ async function findTeam(req, res) {
 
     const { data: lead, error } = await supabase
       .from('leads')
-      .select('id, company, name, role, linkedin_url')
+      .select('id, company, name, role, email, linkedin_url')
       .eq('id', lead_id)
       .single();
     if (error) { logError('findTeam fetch lead', error); return res.status(404).json({ error: 'Lead not found' }); }
     if (!lead.company) return res.status(400).json({ error: 'Lead has no company name to search for' });
 
-    const { people, stats } = await phantombusterService.searchTeam(lead.company);
+    const source = peopleSource();
+    let people;
+    let stats;
+    let org = null;
+    if (source === 'apollo') {
+      const found = await apolloService.findTeamAtCompany(lead.company);
+      people = [...found.people]; // a copy: the Apollo result may be cached
+      stats = found.stats;
+      org = found.org;
+    } else {
+      const found = await phantombusterService.searchTeam(lead.company);
+      people = found.people;
+      stats = { source: 'phantombuster', ...found.stats };
+    }
 
-    // Keep the founder already found for this lead, even if the team search missed them.
-    if (lead.linkedin_url && lead.name && lead.name !== lead.company) {
+    // Keep the founder already found for this lead by the LinkedIn search, even if this search missed them.
+    if (source === 'phantombuster' && lead.linkedin_url && lead.name && lead.name !== lead.company) {
       const key = normalizeProfileUrl(lead.linkedin_url);
       if (!people.some((p) => normalizeProfileUrl(p.linkedin_url) === key)) {
         people.push({
@@ -110,10 +179,10 @@ async function findTeam(req, res) {
       const now = new Date().toISOString();
       const withDegree = people
         .filter((p) => p.connection)
-        .map((p) => ({ ...p, connection_checked_at: now, lead_id: lead.id, kind: 'person' }));
+        .map((p) => ({ ...contactFields(p), connection: p.connection, connection_checked_at: now, lead_id: lead.id, kind: 'person' }));
       const withoutDegree = people
         .filter((p) => !p.connection)
-        .map(({ connection, ...p }) => ({ ...p, lead_id: lead.id, kind: 'person' }));
+        .map((p) => ({ ...contactFields(p), lead_id: lead.id, kind: 'person' }));
       for (const rows of [withDegree, withoutDegree]) {
         if (!rows.length) continue;
         const { error: upsertErr } = await supabase
@@ -122,6 +191,8 @@ async function findTeam(req, res) {
         if (upsertErr) { logError('findTeam upsert', upsertErr); return res.status(500).json({ error: upsertErr.message }); }
       }
     }
+
+    if (source === 'apollo') await applyApolloFindings(lead, people, org);
 
     const { data: contacts, error: listErr } = await supabase
       .from('lead_contacts')
@@ -135,6 +206,7 @@ async function findTeam(req, res) {
     const { contacts: checked, connectionsAvailable } = await applyConnections(contacts, { cachedOnly: true });
     res.json({
       found: people.length,
+      source,
       connections_available: connectionsAvailable,
       unknown_count: checked.filter((c) => c.connection === 'unknown').length,
       search: stats, // how many raw results LinkedIn returned and why any were dropped

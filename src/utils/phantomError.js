@@ -1,6 +1,8 @@
 // Turns a raw Phantombuster / LinkedIn failure into a message the UI can show as-is,
 // instead of the generic "check backend connection". Returns { status, code, message }.
 function friendlyPhantomError(err) {
+  // Errors that already carry their own plain-language message (e.g. from the Apollo lookup).
+  if (err?.friendly) return err.friendly;
   let raw = String(err?.message || err || 'Unknown error');
   if (err?.response?.data) {
     try { raw += `: ${JSON.stringify(err.response.data)}`; } catch { /* ignore */ }

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { normalizeProfileUrl } = require('../utils/linkedinUrl');
+const { alnum, searchableCompanyName } = require('../utils/companyName');
 
 const pb = axios.create({
   baseURL: 'https://api.phantombuster.com/api/v2',
@@ -418,36 +419,6 @@ async function getConnectionSet({ force = false, cachedOnly = false } = {}) {
 const LEADERSHIP_RE = /founder|\bceo\b|\bcto\b|\bcoo\b|\bcfo\b|\bcmo\b|\bcpo\b|\bcro\b|\bcio\b|chief|managing director|\bpresident\b|head of|\bvp\b|vice president|\bowner\b/i;
 const NOT_CURRENT_RE = /\b(former|formerly|ex[- ]|advisor|adviser|investor|board member)\b/i;
 
-function alnum(str) {
-  return String(str || '')
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '') // ignore accents: "Zürich" matches "Zurich"
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '');
-}
-
-const LEGAL_SUFFIX_RE = /[\s,.]+(ag|gmbh|sa|sarl|sàrl|ltd|limited|inc|llc|plc|bv|nv|ab|oy|kg|co)\.?$/i;
-
-// The name to search LinkedIn for. A lead's "company" is sometimes a URL (e.g.
-// "https://deepinstinct.com"), which can't match any profile, and legal suffixes ("AG",
-// "GmbH", "Inc") usually aren't written in people's headlines — both made searches miss.
-function searchableCompanyName(name) {
-  let s = String(name || '').trim();
-  // Only treat it as a web address when it clearly is one (scheme or "www."); a bare
-  // "Create.xyz" is a company name that happens to look like a domain.
-  if (/^(https?:\/\/|www\.)/i.test(s)) {
-    try {
-      const host = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`).hostname.replace(/^www\./i, '');
-      const parts = host.split('.');
-      const secondLevel = ['co', 'com', 'org', 'net', 'ac', 'gov'];
-      s = parts.length >= 3 && secondLevel.includes(parts[parts.length - 2])
-        ? parts[parts.length - 3]
-        : parts[Math.max(0, parts.length - 2)];
-    } catch { /* keep the original text */ }
-  }
-  for (let i = 0; i < 2; i++) s = s.replace(LEGAL_SUFFIX_RE, '');
-  return s.trim();
-}
 
 function profileFields(r) {
   const nameParts = [r.firstName, r.lastName].filter(Boolean);
