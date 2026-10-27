@@ -287,14 +287,78 @@ async function checkConnections(req, res) {
   }
 }
 
-// "Select" a person: marks them selected, approves their lead (so it flows on to Email
-// Outreach), makes sure the company page has an entry on the Engagement page, and sends a
-// LinkedIn connection request unless they're already a connection or one is pending.
+function escapeLike(s) {
+  return String(s).replace(/[\\%_]/g, '\\$&');
+}
+
+// Email Outreach and the LinkedIn follow-up funnel work per LEAD (one name, one email, one LinkedIn
+// URL each), not per person at a company. So a person picked with "Select" needs a lead of their
+// own, or they could never be drafted to, emailed or tracked as themselves.
+//
+//  - the company's own lead already stands for them when it holds their LinkedIn URL;
+//  - a lead for the same LinkedIn profile is reused (and approved), never duplicated;
+//  - otherwise a new lead is created: their name, role, LinkedIn URL and email (from the team
+//    lookup if it has one, otherwise an Apollo lookup, about 1 credit, when `lookupEmail`).
+// Created with source "by_name" so it's listed with the other name-based leads (Option 3) and follows
+// the same connection -> message -> reminder funnel, and stays out of the company lists.
+// Returns { lead, created } or null when the person has no LinkedIn URL.
+async function ensurePersonLead(contact, parent, { lookupEmail = true } = {}) {
+  if (contact.kind !== 'person' || !contact.linkedin_url) return null;
+  const key = normalizeProfileUrl(contact.linkedin_url);
+
+  if (parent.linkedin_url && normalizeProfileUrl(parent.linkedin_url) === key) {
+    return { lead: parent, created: false };
+  }
+
+  const slug = key.split('/in/')[1]?.split('/')[0];
+  if (slug) {
+    const { data } = await supabase
+      .from('leads')
+      .select('id, status, email, linkedin_connection_status')
+      .ilike('linkedin_url', `%/in/${escapeLike(slug)}%`)
+      .limit(1);
+    const existing = data?.[0];
+    if (existing) {
+      if (existing.status !== 'Approved' && existing.status !== 'Pushed') {
+        await supabase.from('leads').update({ status: 'Approved' }).eq('id', existing.id);
+      }
+      return { lead: existing, created: false };
+    }
+  }
+
+  const found = await apolloService.emailForPerson(
+    { name: contact.name, company: parent.company, linkedin_url: contact.linkedin_url },
+    { allowLookup: lookupEmail },
+  );
+  const { data: lead, error } = await supabase
+    .from('leads')
+    .insert({
+      name: contact.name,
+      company: parent.company,
+      role: contact.role || null,
+      linkedin_url: contact.linkedin_url,
+      email: found?.email || null,
+      source: 'by_name',
+      status: 'Approved',
+      notes: `Selected from ${parent.company || 'a company'}'s team`,
+      enrichment_data: { parent_lead_id: parent.id, origin: 'team_select', ...(found ? { email_source: found.source } : {}) },
+      linkedin_connection_status: 'not_sent',
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return { lead, created: true };
+}
+
+// "Select" a person: marks them selected, gives them their own lead (so they appear on Email
+// Outreach and in the LinkedIn follow-up), approves the company's lead, makes sure the company page
+// has an entry on the Engagement page, and sends a LinkedIn connection request unless they're
+// already a connection or one is pending.
 async function selectContact(req, res) {
   try {
     const { data: contact, error } = await supabase
       .from('lead_contacts')
-      .select('*, leads(id, company, linkedin_url)')
+      .select('*, leads(id, company, linkedin_url, email, linkedin_connection_status)')
       .eq('id', req.params.id)
       .single();
     if (error) { logError('selectContact fetch', error); return res.status(404).json({ error: 'Contact not found' }); }
@@ -302,6 +366,14 @@ async function selectContact(req, res) {
 
     await supabase.from('lead_contacts').update({ selected: true }).eq('id', contact.id);
     await supabase.from('leads').update({ status: 'Approved' }).eq('id', contact.lead_id);
+
+    // Their own lead; a problem here must never block the selection or the connection request.
+    let personLead = null;
+    try {
+      personLead = await ensurePersonLead(contact, lead);
+    } catch (leadErr) {
+      logError('selectContact ensurePersonLead', leadErr);
+    }
 
     const { data: companyEntry } = await supabase
       .from('lead_contacts')
@@ -332,12 +404,17 @@ async function selectContact(req, res) {
           .from('lead_contacts')
           .update({ request_status: 'requested', request_error: null, requested_at: now })
           .eq('id', contact.id);
-        // The lead's own founder also feeds the existing accepted-connection → message funnel.
-        if (lead.linkedin_url && normalizeProfileUrl(lead.linkedin_url) === normalizeProfileUrl(contact.linkedin_url)) {
+        // The person's lead feeds the existing accepted-connection -> message funnel (the polling job
+        // watches leads whose request is pending). If their lead couldn't be created, fall back to the
+        // company lead when this person is its own contact.
+        const funnelLead = personLead?.lead
+          || (lead.linkedin_url && normalizeProfileUrl(lead.linkedin_url) === normalizeProfileUrl(contact.linkedin_url) ? lead : null);
+        const funnelId = funnelLead?.id;
+        if (funnelId && funnelLead.linkedin_connection_status !== 'accepted') {
           await supabase
             .from('leads')
             .update({ linkedin_connection_status: 'requested', linkedin_connection_requested_at: now })
-            .eq('id', contact.lead_id);
+            .eq('id', funnelId);
         }
         request = { sent: true };
       } catch (sendErr) {
@@ -352,9 +429,57 @@ async function selectContact(req, res) {
     }
 
     const { data: updated } = await supabase.from('lead_contacts').select('*').eq('id', contact.id).single();
-    res.json({ contact: updated, request });
+    res.json({
+      contact: updated,
+      request,
+      // Their own lead on Email Outreach: whether it was just created and whether it has an email yet.
+      lead: personLead?.lead ? { id: personLead.lead.id, created: personLead.created, has_email: !!personLead.lead.email } : null,
+    });
   } catch (err) {
     logError('selectContact (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// Gives every already-selected person their own lead (people selected before this existed).
+// Idempotent. Spends no Apollo credits unless { lookup_emails: true } is sent; emails already
+// returned by a team lookup are reused either way.
+async function syncSelectedLeads(req, res) {
+  try {
+    const lookupEmail = req.body?.lookup_emails === true;
+    const { data: contacts, error } = await supabase
+      .from('lead_contacts')
+      .select('*, leads(id, company, linkedin_url, email, linkedin_connection_status)')
+      .eq('kind', 'person')
+      .eq('selected', true);
+    if (error) { logError('syncSelectedLeads fetch', error); return res.status(500).json({ error: error.message }); }
+
+    const out = { checked: contacts.length, created: 0, existing: 0, skipped: 0, failed: 0, leads: [] };
+    for (const c of contacts) {
+      try {
+        const r = c.leads ? await ensurePersonLead(c, c.leads, { lookupEmail }) : null;
+        if (!r) { out.skipped++; continue; }
+        if (r.created) {
+          out.created++;
+          // A request already sent should be tracked for acceptance like one sent from now on.
+          if (c.request_status === 'requested') {
+            await supabase
+              .from('leads')
+              .update({ linkedin_connection_status: 'requested', linkedin_connection_requested_at: c.requested_at || new Date().toISOString() })
+              .eq('id', r.lead.id);
+          }
+        } else {
+          out.existing++;
+        }
+        out.leads.push({ name: c.name, company: c.leads.company, created: r.created, has_email: !!r.lead.email });
+      } catch (err) {
+        out.failed++;
+        logError('syncSelectedLeads person', err);
+      }
+    }
+    res.json(out);
+  } catch (err) {
+    logError('syncSelectedLeads (thrown)', err);
     res.status(500).json({ error: err.message });
   }
 }
@@ -510,6 +635,6 @@ async function postComment(req, res) {
 
 module.exports = {
   listContacts, findTeam, addPerson, checkConnections,
-  selectContact, deselectContact,
+  selectContact, deselectContact, syncSelectedLeads,
   refreshPosts, draftComments, postComment, commentCsv,
 };

@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { alnum, domainOf, searchableCompanyName } = require('../utils/companyName');
 const { seniorityRank } = require('../utils/titleSeniority');
+const { normalizeProfileUrl } = require('../utils/linkedinUrl');
 
 function isConfigured() {
   const key = process.env.APOLLO_API_KEY;
@@ -402,7 +403,30 @@ async function findTeamAtCompany(companyName, { maxPeople } = {}) {
   return result;
 }
 
+// Apollo returns a placeholder address ("email_not_unlocked@...") for emails it won't reveal.
+function isUsableEmail(email) {
+  return !!email && !/not_unlocked|unavailable|\*{3}/i.test(email);
+}
+
+/**
+ * The email for one person, for when they're picked as a contact. Reuses an email already returned
+ * by a team lookup (free); otherwise asks Apollo by name + company + LinkedIn URL (about 1 credit).
+ * Returns { email, source } or null. Never throws.
+ */
+async function emailForPerson({ name, company, linkedin_url }, { allowLookup = true } = {}) {
+  const key = normalizeProfileUrl(linkedin_url);
+  if (key) {
+    for (const { result } of teamCache.values()) {
+      const hit = (result.people || []).find((p) => p.email && normalizeProfileUrl(p.linkedin_url) === key);
+      if (hit && isUsableEmail(hit.email)) return { email: hit.email, source: 'apollo' };
+    }
+  }
+  if (!allowLookup || !isConfigured()) return null;
+  const person = await findPerson(name, company, linkedin_url);
+  return person && isUsableEmail(person.email) ? { email: person.email, source: 'apollo' } : null;
+}
+
 module.exports = {
   isConfigured, findEmail, findPerson, getCompanyEmployeeCount,
-  findTeamAtCompany, pickOrganization, pickOrganizations, rankLeaders, queryString,
+  findTeamAtCompany, pickOrganization, pickOrganizations, rankLeaders, queryString, emailForPerson,
 };
