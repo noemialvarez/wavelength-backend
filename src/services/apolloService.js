@@ -12,14 +12,17 @@ function isConfigured() {
  * Look up a person via Apollo People Match.
  * Returns { email, title, headline } on success (any of which may be null),
  * or null if not found / key not configured.
- * Never throws — failures are logged and swallowed so the caller flow continues.
+ * Never throws by default — failures are logged and swallowed so the caller flow continues.
+ * With { throwOnError: true } a key / plan / rate-limit problem is thrown as an Error that carries a
+ * plain-language `.friendly` message, so a caller can tell "no email exists" from "Apollo refused".
  */
-async function findPerson(name, company, linkedin_url) {
+async function findPerson(name, company, linkedin_url, { throwOnError = false } = {}) {
   if (!isConfigured()) {
     console.log('[Apollo] API key not configured — skipping people lookup');
     return null;
   }
-  if (!name || !company) return null;
+  // A name plus either a company or a LinkedIn profile is enough for Apollo to match on.
+  if (!name || (!company && !linkedin_url)) return null;
 
   const parts = name.trim().split(/\s+/);
   const firstName = parts[0];
@@ -29,9 +32,15 @@ async function findPerson(name, company, linkedin_url) {
   const payload = {
     first_name: firstName,
     last_name: lastName,
-    organization_name: company,
     reveal_personal_emails: false,
   };
+  if (company) {
+    // A lead's company can be a web address ("https://sekoia.io"): send its domain, and the plain
+    // name rather than the whole URL.
+    payload.organization_name = searchableCompanyName(company) || company;
+    const domain = domainOf(company);
+    if (domain) payload.domain = domain;
+  }
   if (linkedin_url) payload.linkedin_url = linkedin_url;
   const headers = {
     'Content-Type': 'application/json',
@@ -71,6 +80,7 @@ async function findPerson(name, company, linkedin_url) {
     } else {
       console.error('[Apollo] findPerson error:', err.message);
     }
+    if (throwOnError) throw apolloError(err, 'email lookup');
     return null;
   }
 }
@@ -411,9 +421,9 @@ function isUsableEmail(email) {
 /**
  * The email for one person, for when they're picked as a contact. Reuses an email already returned
  * by a team lookup (free); otherwise asks Apollo by name + company + LinkedIn URL (about 1 credit).
- * Returns { email, source } or null. Never throws.
+ * Returns { email, source } or null. Never throws unless { throwOnError: true } (see findPerson).
  */
-async function emailForPerson({ name, company, linkedin_url }, { allowLookup = true } = {}) {
+async function emailForPerson({ name, company, linkedin_url }, { allowLookup = true, throwOnError = false } = {}) {
   const key = normalizeProfileUrl(linkedin_url);
   if (key) {
     for (const { result } of teamCache.values()) {
@@ -422,7 +432,7 @@ async function emailForPerson({ name, company, linkedin_url }, { allowLookup = t
     }
   }
   if (!allowLookup || !isConfigured()) return null;
-  const person = await findPerson(name, company, linkedin_url);
+  const person = await findPerson(name, company, linkedin_url, { throwOnError });
   return person && isUsableEmail(person.email) ? { email: person.email, source: 'apollo' } : null;
 }
 

@@ -356,22 +356,34 @@ async function enrichLead(req, res) {
 async function findLeadEmail(req, res) {
   try {
     if (!apolloService.isConfigured()) {
-      return res.status(400).json({ error: 'APOLLO_API_KEY is not configured' });
+      return res.status(400).json({ error: 'Apollo is not set up. Add APOLLO_API_KEY in Railway.', code: 'apollo_key' });
     }
 
     const { data: lead, error } = await supabase
-      .from('leads').select('id, name, company, email').eq('id', req.params.id).single();
+      .from('leads').select('id, name, company, email, linkedin_url, enrichment_data').eq('id', req.params.id).single();
     if (error) { logError('findLeadEmail fetch', error); return res.status(404).json({ error: 'Lead not found' }); }
 
-    const email = await apolloService.findEmail(lead.name, lead.company);
-    if (!email) return res.json({ email: null });
+    // Already has one: nothing to look up, and no Apollo credit spent.
+    if (lead.email) return res.json({ email: lead.email, existing: true });
 
-    const { error: updateError } = await supabase.from('leads').update({ email }).eq('id', lead.id);
+    // Name + LinkedIn profile (+ company when there is one) is what lets Apollo pick the right person.
+    // Apollo refusing (key, plan, rate limit) is reported as such rather than as "no email found".
+    const found = await apolloService.emailForPerson(
+      { name: lead.name, company: lead.company, linkedin_url: lead.linkedin_url },
+      { throwOnError: true },
+    );
+    if (!found) return res.json({ email: null });
+
+    const { error: updateError } = await supabase
+      .from('leads')
+      .update({ email: found.email, enrichment_data: { ...(lead.enrichment_data || {}), email_source: found.source } })
+      .eq('id', lead.id);
     if (updateError) { logError('findLeadEmail update', updateError); return res.status(500).json({ error: updateError.message }); }
 
-    res.json({ email });
+    res.json({ email: found.email, source: found.source });
   } catch (err) {
     logError('findLeadEmail (thrown)', err);
+    if (err?.friendly) return res.status(err.friendly.status).json({ error: err.friendly.message, code: err.friendly.code });
     res.status(500).json({ error: err.message });
   }
 }
