@@ -21,12 +21,14 @@ First name: ${firstName}
 Company: ${lead.company || 'their company'}
 Role: ${lead.role || 'Founder'}
 Signal / recent news: ${lead.notes || ''}
-
+${lead.purpose_of_contact ? `Purpose of contact: ${lead.purpose_of_contact}
+` : ''}
 RULES:
 - Greeting: "Hi ${firstName}," — never use last name
 - Line 1: one specific sentence referencing their signal/news. Be concrete.
 - Line 2: one sentence on why the sender is relevant to them right now.
 - Line 3: clear CTA — propose a 15-minute call this week or next.
+- If a purpose of contact is given, the email is about exactly that (not a sales pitch): line 1 says who the sender is in a few words, line 2 states the purpose and why this person, line 3 makes the matching ask.
 - Sign off: "Best," on its own line (no name — sender adds it manually)
 - Short sentences. Direct. Warm but not effusive.
 - Max 3 sentences in the body (not counting greeting and sign-off).

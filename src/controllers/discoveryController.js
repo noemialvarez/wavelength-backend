@@ -378,4 +378,68 @@ async function findByName(req, res) {
   }
 }
 
-module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal, findByDescription, findByIcp, findByName };
+// Option 3, "email" mode: the user wants the person's email address, not a LinkedIn connection.
+// Saves the person as a lead (source by_name_email, so they never show up in the LinkedIn lists)
+// and asks Apollo for their email — only because the user chose email for this search.
+// Apollo needs a company or a LinkedIn profile to match the right person.
+async function findEmailByName(req, res) {
+  try {
+    const { firstName, lastName, company, linkedinProfileUrl, purpose } = req.body;
+    if (!firstName || !lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
+    if (!company && !linkedinProfileUrl) {
+      return res.status(400).json({ error: 'Add a company name or a LinkedIn profile so Apollo can find the right person.' });
+    }
+    const name = `${firstName} ${lastName}`.trim();
+
+    // Searching the same person twice reuses their lead instead of duplicating it.
+    let existing = null;
+    let lookup = supabase.from('leads').select('*').eq('source', 'by_name_email').limit(1);
+    lookup = linkedinProfileUrl
+      ? lookup.eq('linkedin_url', linkedinProfileUrl)
+      : lookup.ilike('name', name).ilike('company', company);
+    const { data: found } = await lookup;
+    existing = found?.[0] || null;
+
+    let lead = existing;
+    if (!lead) {
+      const { data, error } = await supabase.from('leads').insert({
+        name,
+        company: company || null,
+        linkedin_url: linkedinProfileUrl || null,
+        source: 'by_name_email',
+        status: 'Approved',
+        purpose_of_contact: purpose || null,
+      }).select().single();
+      if (error) { logError('findEmailByName insert', error); return res.status(400).json({ error: error.message }); }
+      lead = data;
+    } else if (purpose && lead.purpose_of_contact !== purpose) {
+      const { data } = await supabase.from('leads').update({ purpose_of_contact: purpose }).eq('id', lead.id).select().single();
+      if (data) lead = data;
+    }
+
+    if (lead.email) return res.json({ lead, email: lead.email, existing: true });
+
+    try {
+      const found = await apolloService.emailForPerson(
+        { name: lead.name, company: lead.company, linkedin_url: lead.linkedin_url },
+        { throwOnError: true },
+      );
+      if (!found) return res.json({ lead, email: null });
+      const { data: updated } = await supabase
+        .from('leads')
+        .update({ email: found.email, enrichment_data: { ...(lead.enrichment_data || {}), email_source: found.source } })
+        .eq('id', lead.id).select().single();
+      return res.json({ lead: updated || { ...lead, email: found.email }, email: found.email });
+    } catch (err) {
+      // Apollo refused (key, plan, rate limit): keep the lead and say why there is no email.
+      logError('findEmailByName apollo', err);
+      const f = err?.friendly;
+      return res.json({ lead, email: null, error: { message: f?.message || err.message, code: f?.code } });
+    }
+  } catch (err) {
+    logError('findEmailByName (thrown)', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+module.exports = { listRuns, startRun, getRun, listSignals, promoteSignalToLead, dismissSignal, findByDescription, findByIcp, findByName, findEmailByName };

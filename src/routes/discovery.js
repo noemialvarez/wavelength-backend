@@ -15,6 +15,7 @@ router.post('/by-icp', discoveryController.findByIcp);
 
 // LinkedIn people search by name (Option 4 — "by name" discovery)
 router.post('/by-name', discoveryController.findByName);
+router.post('/by-name-email', discoveryController.findEmailByName);
 
 // Raw signals before they become leads
 router.get('/signals', discoveryController.listSignals);
